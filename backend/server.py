@@ -1,0 +1,617 @@
+from fastapi import FastAPI, APIRouter, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from dotenv import load_dotenv
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+import os
+import logging
+from pathlib import Path
+from pydantic import BaseModel
+from typing import List, Optional
+import uuid
+from datetime import datetime, timezone, timedelta
+import bcrypt
+import jwt
+import random
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+# MongoDB connection
+mongo_url = os.environ['MONGO_URL']
+client = AsyncIOMotorClient(mongo_url)
+db = client[os.environ['DB_NAME']]
+
+# JWT Settings
+JWT_SECRET = os.environ.get('JWT_SECRET', 'sukunaW_secret_key_2026')
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = 168
+
+security = HTTPBearer()
+
+app = FastAPI()
+api_router = APIRouter(prefix="/api")
+
+# ==================== MODELS ====================
+class UserRegister(BaseModel):
+    username: str
+    password: str
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+class GameResult(BaseModel):
+    score: int
+    timePlayedSeconds: int
+
+class PurchaseRequest(BaseModel):
+    itemType: str
+    itemName: Optional[str] = None
+
+class TransferRequest(BaseModel):
+    toUsername: str
+    amount: int
+
+class AdminAddCoins(BaseModel):
+    targetUsername: str
+    amount: int
+
+class BonusRequest(BaseModel):
+    bonusType: str
+
+class ChestRequest(BaseModel):
+    chestId: str
+
+# ==================== HELPERS ====================
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+
+def create_token(user_id: str, username: str, is_admin: bool) -> str:
+    payload = {
+        "sub": user_id,
+        "username": username,
+        "is_admin": is_admin,
+        "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS)
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def decode_token(token: str) -> dict:
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Токен истёк")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Неверный токен")
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    payload = decode_token(credentials.credentials)
+    user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    return user
+
+def calculate_level(xp: int) -> int:
+    level = 1
+    xp_for_next = 100
+    remaining_xp = xp
+    while remaining_xp >= xp_for_next and level < 100:
+        remaining_xp -= xp_for_next
+        level += 1
+        xp_for_next = int(xp_for_next * 1.15)
+    return level
+
+# ==================== AUTH ROUTES ====================
+@api_router.post("/auth/register")
+async def register(data: UserRegister):
+    existing = await db.users.find_one({"username": {"$regex": f"^{data.username}$", "$options": "i"}})
+    if existing:
+        raise HTTPException(status_code=400, detail="Это имя пользователя уже занято")
+    
+    if len(data.username) < 3 or len(data.username) > 20:
+        raise HTTPException(status_code=400, detail="Имя пользователя должно быть от 3 до 20 символов")
+    if len(data.password) < 6:
+        raise HTTPException(status_code=400, detail="Пароль должен быть не менее 6 символов")
+    
+    user_id = str(uuid.uuid4())
+    user = {
+        "id": user_id,
+        "username": data.username,
+        "passwordHash": hash_password(data.password),
+        "coins": 0,
+        "level": 1,
+        "xp": 0,
+        "roles": [],
+        "roleGradients": [],
+        "clan": None,
+        "clanCategory": False,
+        "purchaseHistory": [],
+        "isAdmin": False,
+        "isBanned": False,
+        "lastGameTime": None,
+        "lastDailyBonus": None,
+        "lastWeeklyBonus": None,
+        "chests": [],
+        "createdAt": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.users.insert_one(user)
+    token = create_token(user_id, data.username, False)
+    
+    user_response = {k: v for k, v in user.items() if k not in ["passwordHash", "_id"]}
+    return {"token": token, "user": user_response}
+
+@api_router.post("/auth/login")
+async def login(data: UserLogin):
+    user = await db.users.find_one({"username": {"$regex": f"^{data.username}$", "$options": "i"}}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=401, detail="Неверные учётные данные")
+    
+    if not verify_password(data.password, user["passwordHash"]):
+        raise HTTPException(status_code=401, detail="Неверные учётные данные")
+    
+    # Check if user is banned
+    if user.get("isBanned"):
+        raise HTTPException(status_code=403, detail="Ваш аккаунт заблокирован")
+    
+    token = create_token(user["id"], user["username"], user.get("isAdmin", False))
+    user_response = {k: v for k, v in user.items() if k != "passwordHash"}
+    return {"token": token, "user": user_response}
+
+@api_router.get("/auth/me")
+async def get_me(user: dict = Depends(get_current_user)):
+    return {k: v for k, v in user.items() if k != "passwordHash"}
+
+# ==================== GAME ROUTES ====================
+@api_router.post("/game/submit")
+async def submit_game_result(data: GameResult, user: dict = Depends(get_current_user)):
+    max_possible_score = data.timePlayedSeconds * 5
+    if data.score > max_possible_score or data.score < 0:
+        raise HTTPException(status_code=400, detail="Недопустимый результат игры")
+    if data.timePlayedSeconds > 120:
+        raise HTTPException(status_code=400, detail="Недопустимая продолжительность игры")
+    
+    now = datetime.now(timezone.utc)
+    if user.get("lastGameTime"):
+        last_time = datetime.fromisoformat(user["lastGameTime"].replace("Z", "+00:00"))
+        if (now - last_time).total_seconds() < 10:
+            raise HTTPException(status_code=429, detail="Подождите перед следующей игрой")
+    
+    coins_earned = min(data.score // 10, 15)
+    xp_earned = data.score // 5 + data.timePlayedSeconds
+    
+    new_xp = user.get("xp", 0) + xp_earned
+    new_level = calculate_level(new_xp)
+    new_coins = user.get("coins", 0) + coins_earned
+    
+    # Random chest drop (10% chance if score > 30)
+    chest_dropped = None
+    if data.score > 30 and random.random() < 0.1:
+        chest_types = ['common', 'rare', 'epic']
+        weights = [0.7, 0.25, 0.05]
+        rand = random.random()
+        cumulative = 0
+        chest_type = 'common'
+        for i, w in enumerate(weights):
+            cumulative += w
+            if rand < cumulative:
+                chest_type = chest_types[i]
+                break
+        chest_dropped = {
+            "id": str(int(now.timestamp() * 1000)),
+            "type": chest_type,
+            "droppedAt": now.isoformat()
+        }
+    
+    update_data = {
+        "coins": new_coins,
+        "xp": new_xp,
+        "level": new_level,
+        "lastGameTime": now.isoformat()
+    }
+    
+    if chest_dropped:
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": update_data, "$push": {"chests": chest_dropped}}
+        )
+    else:
+        await db.users.update_one({"id": user["id"]}, {"$set": update_data})
+    
+    return {
+        "coinsEarned": coins_earned,
+        "xpEarned": xp_earned,
+        "totalCoins": new_coins,
+        "totalXp": new_xp,
+        "level": new_level,
+        "chestDropped": chest_dropped
+    }
+
+# ==================== SHOP ROUTES ====================
+SHOP_ITEMS = {
+    "custom_role": {"price": 1000, "name": "Кастомная роль"},
+    "custom_gradient": {"price": 2000, "name": "Градиент для роли"},
+    "create_clan": {"price": 3000, "name": "Создание клана"},
+    "clan_category": {"price": 4000, "name": "Категория клана"}
+}
+
+@api_router.get("/shop/items")
+async def get_shop_items():
+    return SHOP_ITEMS
+
+@api_router.post("/shop/purchase")
+async def purchase_item(data: PurchaseRequest, user: dict = Depends(get_current_user)):
+    if data.itemType not in SHOP_ITEMS:
+        raise HTTPException(status_code=400, detail="Неверный тип товара")
+    
+    item = SHOP_ITEMS[data.itemType]
+    
+    if user["coins"] < item["price"]:
+        raise HTTPException(status_code=400, detail="Недостаточно монет")
+    
+    update_data = {"coins": user["coins"] - item["price"]}
+    
+    if data.itemType == "custom_role":
+        if not data.itemName:
+            raise HTTPException(status_code=400, detail="Введите название роли")
+        update_data["roles"] = user.get("roles", []) + [data.itemName]
+    elif data.itemType == "custom_gradient":
+        if not data.itemName:
+            raise HTTPException(status_code=400, detail="Введите название градиента")
+        update_data["roleGradients"] = user.get("roleGradients", []) + [data.itemName]
+    elif data.itemType == "create_clan":
+        if user.get("clan"):
+            raise HTTPException(status_code=400, detail="У вас уже есть клан")
+        if not data.itemName:
+            raise HTTPException(status_code=400, detail="Введите название клана")
+        update_data["clan"] = data.itemName
+    elif data.itemType == "clan_category":
+        if not user.get("clan"):
+            raise HTTPException(status_code=400, detail="Сначала создайте клан")
+        if user.get("clanCategory"):
+            raise HTTPException(status_code=400, detail="У вас уже есть категория")
+        update_data["clanCategory"] = True
+    
+    now = datetime.now(timezone.utc)
+    purchase_record = {
+        "item": item["name"],
+        "itemName": data.itemName,
+        "price": item["price"],
+        "date": now.strftime("%Y-%m-%d"),
+        "time": now.strftime("%H:%M")
+    }
+    
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": update_data, "$push": {"purchaseHistory": purchase_record}}
+    )
+    
+    return {"success": True, "purchase": purchase_record, "newBalance": update_data["coins"]}
+
+# ==================== TRANSFER ROUTES ====================
+@api_router.post("/transfer")
+async def transfer_coins(data: TransferRequest, user: dict = Depends(get_current_user)):
+    if data.amount <= 0:
+        raise HTTPException(status_code=400, detail="Сумма должна быть положительной")
+    if data.amount > user["coins"]:
+        raise HTTPException(status_code=400, detail="Недостаточно монет")
+    if data.toUsername.lower() == user["username"].lower():
+        raise HTTPException(status_code=400, detail="Нельзя отправить монеты себе")
+    
+    recipient = await db.users.find_one({"username": {"$regex": f"^{data.toUsername}$", "$options": "i"}}, {"_id": 0})
+    if not recipient:
+        raise HTTPException(status_code=404, detail="Получатель не найден")
+    
+    await db.users.update_one({"id": user["id"]}, {"$inc": {"coins": -data.amount}})
+    await db.users.update_one({"id": recipient["id"]}, {"$inc": {"coins": data.amount}})
+    
+    return {
+        "success": True,
+        "transferred": data.amount,
+        "to": recipient["username"],
+        "newBalance": user["coins"] - data.amount
+    }
+
+# ==================== BONUS ROUTES ====================
+DAILY_BONUS = 50
+WEEKLY_BONUS = 300
+
+@api_router.post("/bonus/claim")
+async def claim_bonus(data: BonusRequest, user: dict = Depends(get_current_user)):
+    if data.bonusType not in ["daily", "weekly"]:
+        raise HTTPException(status_code=400, detail="Неверный тип бонуса")
+    
+    now = datetime.now(timezone.utc)
+    
+    if data.bonusType == "daily":
+        last_claim = user.get("lastDailyBonus")
+        if last_claim:
+            last_time = datetime.fromisoformat(last_claim.replace("Z", "+00:00"))
+            hours_since = (now - last_time).total_seconds() / 3600
+            if hours_since < 24:
+                hours_left = int(24 - hours_since)
+                raise HTTPException(status_code=400, detail=f"Ежедневный бонус доступен через {hours_left} ч.")
+        
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$inc": {"coins": DAILY_BONUS}, "$set": {"lastDailyBonus": now.isoformat()}}
+        )
+        return {"success": True, "bonusType": "daily", "amount": DAILY_BONUS, "newBalance": user["coins"] + DAILY_BONUS}
+    
+    elif data.bonusType == "weekly":
+        last_claim = user.get("lastWeeklyBonus")
+        if last_claim:
+            last_time = datetime.fromisoformat(last_claim.replace("Z", "+00:00"))
+            days_since = (now - last_time).total_seconds() / 86400
+            if days_since < 7:
+                days_left = int(7 - days_since)
+                raise HTTPException(status_code=400, detail=f"Еженедельный бонус доступен через {days_left} дн.")
+        
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$inc": {"coins": WEEKLY_BONUS}, "$set": {"lastWeeklyBonus": now.isoformat()}}
+        )
+        return {"success": True, "bonusType": "weekly", "amount": WEEKLY_BONUS, "newBalance": user["coins"] + WEEKLY_BONUS}
+
+# ==================== CHEST ROUTES ====================
+CHEST_REWARDS = {
+    "common": {"min": 10, "max": 50},
+    "rare": {"min": 50, "max": 150},
+    "epic": {"min": 150, "max": 500}
+}
+
+@api_router.post("/chest/open")
+async def open_chest(data: ChestRequest, user: dict = Depends(get_current_user)):
+    chests = user.get("chests", [])
+    chest = next((c for c in chests if c["id"] == data.chestId), None)
+    
+    if not chest:
+        raise HTTPException(status_code=404, detail="Сундук не найден")
+    
+    reward = CHEST_REWARDS.get(chest["type"], CHEST_REWARDS["common"])
+    coins_won = random.randint(reward["min"], reward["max"])
+    
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$inc": {"coins": coins_won}, "$pull": {"chests": {"id": data.chestId}}}
+    )
+    
+    return {
+        "success": True,
+        "chestType": chest["type"],
+        "coinsWon": coins_won,
+        "newBalance": user["coins"] + coins_won
+    }
+
+# ==================== ADMIN ROUTES ====================
+@api_router.post("/admin/add-coins")
+async def admin_add_coins(data: AdminAddCoins, user: dict = Depends(get_current_user)):
+    if not user.get("isAdmin"):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    if data.amount <= 0:
+        raise HTTPException(status_code=400, detail="Сумма должна быть положительной")
+    
+    target = await db.users.find_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    
+    await db.users.update_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"$inc": {"coins": data.amount}})
+    
+    return {"success": True, "addedCoins": data.amount, "toUser": target["username"], "newBalance": target["coins"] + data.amount}
+
+@api_router.get("/admin/users")
+async def admin_get_users(user: dict = Depends(get_current_user)):
+    if not user.get("isAdmin"):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    
+    users = await db.users.find({}, {"_id": 0, "passwordHash": 0}).to_list(1000)
+    return users
+
+class GiveChestRequest(BaseModel):
+    targetUsername: str
+    chestType: str
+
+class BanUserRequest(BaseModel):
+    targetUsername: str
+
+class SetAdminRequest(BaseModel):
+    targetUsername: str
+    creatorPassword: str
+
+@api_router.post("/admin/give-chest")
+async def admin_give_chest(data: GiveChestRequest, user: dict = Depends(get_current_user)):
+    if not user.get("isAdmin"):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    
+    if data.chestType not in ["common", "rare", "epic"]:
+        raise HTTPException(status_code=400, detail="Неверный тип сундука")
+    
+    target = await db.users.find_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    
+    now = datetime.now(timezone.utc)
+    chest = {
+        "id": str(int(now.timestamp() * 1000)),
+        "type": data.chestType,
+        "droppedAt": now.isoformat()
+    }
+    
+    await db.users.update_one(
+        {"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}},
+        {"$push": {"chests": chest}}
+    )
+    
+    return {"success": True, "toUser": target["username"], "chestType": data.chestType}
+
+# Creator credentials
+CREATOR_USERNAME = "pseudotamine"
+CREATOR_PASSWORD = "synapthys5082_"
+
+@api_router.post("/admin/ban")
+async def admin_ban_user(data: BanUserRequest, user: dict = Depends(get_current_user)):
+    if not user.get("isAdmin"):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    
+    target = await db.users.find_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    
+    # Cannot ban the creator
+    if target["username"].lower() == CREATOR_USERNAME.lower():
+        raise HTTPException(status_code=403, detail="Не пытайтесь забанить создателя!")
+    
+    if target.get("isBanned"):
+        raise HTTPException(status_code=400, detail="Пользователь уже забанен")
+    
+    await db.users.update_one(
+        {"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}},
+        {"$set": {"isBanned": True}}
+    )
+    
+    return {"success": True, "message": f"{target['username']} забанен"}
+
+@api_router.post("/admin/unban")
+async def admin_unban_user(data: BanUserRequest, user: dict = Depends(get_current_user)):
+    if not user.get("isAdmin"):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    
+    target = await db.users.find_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    
+    if not target.get("isBanned"):
+        raise HTTPException(status_code=400, detail="Пользователь не забанен")
+    
+    await db.users.update_one(
+        {"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}},
+        {"$set": {"isBanned": False}}
+    )
+    
+    return {"success": True, "message": f"{target['username']} разбанен"}
+
+@api_router.post("/admin/set-admin")
+async def admin_set_admin(data: SetAdminRequest, user: dict = Depends(get_current_user)):
+    if not user.get("isAdmin"):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    
+    # Only creator can set admins
+    if user["username"].lower() != CREATOR_USERNAME.lower():
+        raise HTTPException(status_code=403, detail="Только создатель может назначать администраторов")
+    
+    # Verify creator password
+    if data.creatorPassword != CREATOR_PASSWORD:
+        raise HTTPException(status_code=403, detail="Неверный пароль создателя")
+    
+    target = await db.users.find_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    
+    # Cannot change creator's admin status
+    if target["username"].lower() == CREATOR_USERNAME.lower():
+        raise HTTPException(status_code=403, detail="Нельзя изменить статус создателя")
+    
+    if target.get("isBanned"):
+        raise HTTPException(status_code=400, detail="Нельзя назначить забаненного пользователя")
+    
+    if target.get("isAdmin"):
+        raise HTTPException(status_code=400, detail="Пользователь уже администратор")
+    
+    await db.users.update_one(
+        {"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}},
+        {"$set": {"isAdmin": True}}
+    )
+    
+    return {"success": True, "message": f"{target['username']} назначен администратором"}
+
+@api_router.post("/admin/remove-admin")
+async def admin_remove_admin(data: SetAdminRequest, user: dict = Depends(get_current_user)):
+    if not user.get("isAdmin"):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    
+    # Only creator can remove admins
+    if user["username"].lower() != CREATOR_USERNAME.lower():
+        raise HTTPException(status_code=403, detail="Только создатель может снимать администраторов")
+    
+    # Verify creator password
+    if data.creatorPassword != CREATOR_PASSWORD:
+        raise HTTPException(status_code=403, detail="Неверный пароль создателя")
+    
+    target = await db.users.find_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    
+    # Cannot change creator's admin status
+    if target["username"].lower() == CREATOR_USERNAME.lower():
+        raise HTTPException(status_code=403, detail="Нельзя изменить статус создателя")
+    
+    if not target.get("isAdmin"):
+        raise HTTPException(status_code=400, detail="Пользователь не является администратором")
+    
+    await db.users.update_one(
+        {"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}},
+        {"$set": {"isAdmin": False}}
+    )
+    
+    return {"success": True, "message": f"{target['username']} больше не администратор"}
+
+@api_router.get("/admin/is-creator")
+async def admin_is_creator(user: dict = Depends(get_current_user)):
+    if not user.get("isAdmin"):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    
+    is_creator = user["username"].lower() == CREATOR_USERNAME.lower()
+    return {"isCreator": is_creator}
+
+# ==================== HEALTH CHECK ====================
+@api_router.get("/health")
+async def health():
+    return {"status": "ok"}
+
+# Include router
+app.include_router(api_router)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+@app.on_event("startup")
+async def startup_event():
+    admin = await db.users.find_one({"username": "pseudotamine"})
+    if not admin:
+        admin_id = str(uuid.uuid4())
+        admin_user = {
+            "id": admin_id,
+            "username": "pseudotamine",
+            "passwordHash": hash_password("synapthys5082_"),
+            "coins": 0,
+            "level": 1,
+            "xp": 0,
+            "roles": ["Админ"],
+            "roleGradients": [],
+            "clan": None,
+            "clanCategory": False,
+            "purchaseHistory": [],
+            "isAdmin": True,
+            "lastGameTime": None,
+            "lastDailyBonus": None,
+            "lastWeeklyBonus": None,
+            "chests": [],
+            "createdAt": datetime.now(timezone.utc).isoformat()
+        }
+        await db.users.insert_one(admin_user)
+        logger.info("Admin user 'pseudotamine' created")
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    client.close()
