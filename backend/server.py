@@ -63,6 +63,12 @@ class BonusRequest(BaseModel):
 class ChestRequest(BaseModel):
     chestId: str
 
+class ClickerSaveRequest(BaseModel):
+    coins: int
+
+class ClickerUpgradeRequest(BaseModel):
+    upgradeType: str
+
 # ==================== HELPERS ====================
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -570,6 +576,97 @@ async def admin_is_creator(user: dict = Depends(get_current_user)):
 @api_router.get("/health")
 async def health():
     return {"status": "ok"}
+
+# ==================== LEADERBOARD ====================
+@api_router.get("/leaderboard")
+async def get_leaderboard(user: dict = Depends(get_current_user)):
+    # Get top 50 non-admin users sorted by coins
+    cursor = db.users.find(
+        {"isAdmin": {"$ne": True}},
+        {"_id": 0, "id": 1, "username": 1, "coins": 1, "level": 1}
+    ).sort("coins", -1).limit(50)
+    
+    leaders = await cursor.to_list(length=50)
+    return leaders
+
+# ==================== CLICKER GAME ====================
+@api_router.post("/clicker/save")
+async def clicker_save_coins(data: ClickerSaveRequest, user: dict = Depends(get_current_user)):
+    if data.coins < 1 or data.coins > 1000:
+        raise HTTPException(status_code=400, detail="Некорректная сумма")
+    
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$inc": {"coins": data.coins}}
+    )
+    
+    return {"success": True, "coinsAdded": data.coins}
+
+@api_router.post("/clicker/upgrade")
+async def clicker_upgrade(data: ClickerUpgradeRequest, user: dict = Depends(get_current_user)):
+    upgrades = {
+        "clickPower": {"basePrice": 500, "maxLevel": 10, "field": "clickerClickPower"},
+        "autoClicker": {"basePrice": 1000, "maxLevel": 5, "field": "clickerAutoLevel"}
+    }
+    
+    if data.upgradeType not in upgrades:
+        raise HTTPException(status_code=400, detail="Неверный тип улучшения")
+    
+    upgrade = upgrades[data.upgradeType]
+    current_level = user.get(upgrade["field"], 0)
+    
+    if current_level >= upgrade["maxLevel"]:
+        raise HTTPException(status_code=400, detail="Максимальный уровень достигнут")
+    
+    price = upgrade["basePrice"] + (current_level * 200)
+    
+    if user.get("coins", 0) < price:
+        raise HTTPException(status_code=400, detail="Недостаточно монет")
+    
+    await db.users.update_one(
+        {"id": user["id"]},
+        {
+            "$inc": {"coins": -price, upgrade["field"]: 1}
+        }
+    )
+    
+    return {"success": True, "newLevel": current_level + 1}
+
+# ==================== SHOP CHESTS ====================
+class BuyChestRequest(BaseModel):
+    chestType: str
+
+@api_router.post("/shop/buy-chest")
+async def shop_buy_chest(data: BuyChestRequest, user: dict = Depends(get_current_user)):
+    chest_prices = {
+        "common": 85,
+        "rare": 275,
+        "epic": 700
+    }
+    
+    if data.chestType not in chest_prices:
+        raise HTTPException(status_code=400, detail="Неверный тип сундука")
+    
+    price = chest_prices[data.chestType]
+    
+    if user.get("coins", 0) < price:
+        raise HTTPException(status_code=400, detail="Недостаточно монет")
+    
+    chest = {
+        "id": str(uuid.uuid4()),
+        "type": data.chestType,
+        "droppedAt": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.users.update_one(
+        {"id": user["id"]},
+        {
+            "$inc": {"coins": -price},
+            "$push": {"chests": chest}
+        }
+    )
+    
+    return {"success": True, "chest": chest, "newBalance": user["coins"] - price}
 
 # Include router
 app.include_router(api_router)
