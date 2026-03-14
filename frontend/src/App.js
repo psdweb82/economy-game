@@ -700,6 +700,10 @@ const DodgeGame = () => {
         }
       }
 
+      // Constrain player within canvas boundaries
+      g.player.x = Math.max(g.player.size, Math.min(600 - g.player.size, g.player.x));
+      g.player.y = Math.max(g.player.size, Math.min(400 - g.player.size, g.player.y));
+
       // Speed increases at milestones
       if (g.score >= 50) g.speedMultiplier = 1.5;
       if (g.score >= 100) g.speedMultiplier = 2;
