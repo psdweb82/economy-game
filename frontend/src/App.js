@@ -127,12 +127,14 @@ const Navbar = () => {
   };
 
   const xpProgress = getXpProgress();
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const navItems = [
     { path: "/dashboard", label: "Главная", icon: Home },
     { path: "/games", label: "Игры", icon: Gamepad2 },
     { path: "/shop", label: "Магазин", icon: ShoppingCart },
     { path: "/leaderboard", label: "Топ", icon: Trophy },
+    { path: "/transfer", label: "Переводы", icon: ArrowLeftRight },
     { path: "/profile", label: "Профиль", icon: User },
   ];
 
@@ -144,13 +146,14 @@ const Navbar = () => {
 
   return (
     <>
-      <nav className="fixed top-0 w-full z-50 bg-black/90 backdrop-blur-md border-b border-white/5 h-16" data-testid="navbar">
+      <nav className="fixed top-0 w-full z-50 bg-black/90 backdrop-blur-md border-b border-white/5 h-14 md:h-16" data-testid="navbar">
         <div className="max-w-7xl mx-auto h-full px-4 md:px-6 flex items-center justify-between">
-          <Link to="/dashboard" className="font-orbitron text-xl font-bold text-white tracking-wider flex items-center gap-2" data-testid="nav-logo">
+          <Link to="/dashboard" className="font-orbitron text-lg md:text-xl font-bold text-white tracking-wider flex items-center gap-2" data-testid="nav-logo">
             <span className="text-glow">⛧</span> sukunaW
           </Link>
 
-          <div className="hidden md:flex items-center gap-6">
+          {/* Desktop Nav */}
+          <div className="hidden lg:flex items-center gap-5">
             {allNavItems.map((item) => (
               <Link
                 key={item.path}
@@ -168,7 +171,7 @@ const Navbar = () => {
             ))}
           </div>
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 md:gap-4">
             <div className="hidden sm:flex flex-col items-end">
               <div className="flex items-center gap-2">
                 <span className="text-xs text-gray-400 font-orbitron">УР</span>
@@ -179,13 +182,12 @@ const Navbar = () => {
               </div>
             </div>
 
-            <div className="flex items-center gap-2 px-3 py-1.5 bg-white/5 border border-white/10">
+            <div className="flex items-center gap-2 px-2 md:px-3 py-1.5 bg-white/5 border border-white/10">
               <Coins size={14} className="text-yellow-400" />
-              <span className="font-orbitron font-bold text-white" data-testid="user-coins">{user?.coins || 0}</span>
+              <span className="font-orbitron font-bold text-white text-sm md:text-base" data-testid="user-coins">{user?.coins || 0}</span>
             </div>
 
-            <span className="hidden md:block font-rajdhani text-gray-300" data-testid="user-username">{user?.username}</span>
-            {user?.isAdmin && <span className="admin-badge" data-testid="admin-badge">АДМИН</span>}
+            {user?.isAdmin && <span className="admin-badge hidden md:block" data-testid="admin-badge">АДМИН</span>}
 
             <button onClick={handleLogout} className="p-2 text-gray-400 hover:text-white transition-colors" data-testid="logout-btn" title="Выйти">
               <LogOut size={18} strokeWidth={1.5} />
@@ -194,20 +196,53 @@ const Navbar = () => {
         </div>
       </nav>
 
-      {/* Mobile Nav */}
-      <div className="md:hidden fixed bottom-0 left-0 right-0 bg-black/95 backdrop-blur-md border-t border-white/10 py-2 z-50">
-        <div className="flex justify-around items-center">
-          {allNavItems.map((item) => (
+      {/* Mobile Bottom Nav */}
+      <div className="lg:hidden fixed bottom-0 left-0 right-0 bg-black/95 backdrop-blur-md border-t border-white/10 z-50">
+        {/* Main icons row */}
+        <div className="flex justify-around items-center py-2">
+          {allNavItems.slice(0, 4).map((item) => (
             <Link
               key={item.path}
               to={item.path}
-              className={`flex flex-col items-center gap-1 py-1 px-1 ${location.pathname === item.path ? "text-white" : "text-gray-500"}`}
+              onClick={() => setMobileMenuOpen(false)}
+              className={`flex flex-col items-center gap-0.5 py-1 px-2 ${location.pathname === item.path ? "text-white" : "text-gray-500"}`}
             >
-              <item.icon size={18} strokeWidth={1.5} />
-              <span className="text-[8px] font-orbitron">{item.label}</span>
+              <item.icon size={20} strokeWidth={1.5} />
+              <span className="text-[9px] font-orbitron">{item.label}</span>
             </Link>
           ))}
+          {/* More button */}
+          <button
+            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+            className={`flex flex-col items-center gap-0.5 py-1 px-2 ${mobileMenuOpen ? "text-white" : "text-gray-500"}`}
+          >
+            <ChevronRight size={20} strokeWidth={1.5} className={`transition-transform ${mobileMenuOpen ? "rotate-90" : "-rotate-90"}`} />
+            <span className="text-[9px] font-orbitron">Ещё</span>
+          </button>
         </div>
+
+        {/* Expandable menu */}
+        {mobileMenuOpen && (
+          <div className="border-t border-white/10 py-3 px-4 bg-black/95">
+            <div className="grid grid-cols-3 gap-3">
+              {allNavItems.slice(4).map((item) => (
+                <Link
+                  key={item.path}
+                  to={item.path}
+                  onClick={() => setMobileMenuOpen(false)}
+                  className={`flex flex-col items-center gap-1 py-3 px-2 rounded-lg border ${
+                    location.pathname === item.path 
+                      ? "text-white bg-white/10 border-white/20" 
+                      : "text-gray-400 bg-white/5 border-white/10"
+                  }`}
+                >
+                  <item.icon size={22} strokeWidth={1.5} />
+                  <span className="text-[10px] font-orbitron">{item.label}</span>
+                </Link>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </>
   );
