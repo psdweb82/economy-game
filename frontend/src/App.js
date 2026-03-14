@@ -636,27 +636,24 @@ const ChestCard = ({ chest }) => {
             <div className="absolute top-0 left-1/2 -translate-x-1/2 w-1 h-full bg-yellow-400 z-10 shadow-[0_0_20px_rgba(250,204,21,0.8)]" />
             <div className="absolute top-0 left-1/2 -translate-x-1/2 w-0 h-0 border-l-[12px] border-r-[12px] border-t-[16px] border-l-transparent border-r-transparent border-t-yellow-400 z-10" />
             
-            {/* Roulette strip */}
-            <div 
-              ref={rouletteRef}
-              className="flex items-center gap-2 py-4"
-              style={{ transform: 'translateX(300px)' }}
-            >
-              {rouletteItems.map((coins, index) => {
-                return (
-                  <div 
-                    key={index}
-                    className="flex-shrink-0 w-28 h-24 flex flex-col items-center justify-center border bg-white/5 border-white/20"
-                  >
-                    <Coins size={24} className="text-gray-400" />
-                    <span className="font-orbitron text-lg mt-1 text-white">
-                      {coins}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
+{/* Roulette strip */}
+<div 
+  ref={rouletteRef}
+  className="flex items-center gap-2 py-4"
+  style={{ transform: 'translateX(300px)' }}
+>
+  {rouletteItems.map((coins, index) => {
+    return (
+      <div 
+        key={index}
+        className="flex-shrink-0 w-28 h-24 flex items-center justify-center border bg-white/5 border-white/20"
+      >
+        <Coins size={24} className="text-yellow-400" />
+      </div>
+    );
+  })}
+</div>
+</div>
           
           <div className="text-center mt-4 text-gray-400 text-sm">
             Крутится...
