@@ -6,7 +6,7 @@ import {
   Home, Gamepad2, ShoppingCart, ArrowLeftRight, User, Shield, LogOut, 
   Coins, TrendingUp, Award, Users, Sun, Star, Package, Gift, 
   Send, Plus, RefreshCw, Eye, EyeOff, ChevronRight, Play, RotateCcw,
-  Palette, FolderTree, Search, Clock, History, Box
+  Palette, FolderTree, Search, Clock, History, Box, Trophy
 } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -49,11 +49,37 @@ const AuthProvider = ({ children }) => {
       const res = await axios.get(`${API}/auth/me`, {
         headers: { Authorization: `Bearer ${token}` },
       });
+      // Check if user is banned
+      if (res.data.isBanned) {
+        toast.error("Ваш аккаунт заблокирован");
+        logout();
+        return;
+      }
       setUser(res.data);
     } catch (e) {
       logout();
     }
   };
+
+  // Check ban status periodically
+  useEffect(() => {
+    if (!token || !user) return;
+    const checkBanStatus = async () => {
+      try {
+        const res = await axios.get(`${API}/auth/me`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.data.isBanned) {
+          toast.error("Ваш аккаунт заблокирован");
+          logout();
+        }
+      } catch (e) {
+        // ignore
+      }
+    };
+    const interval = setInterval(checkBanStatus, 5000); // Check every 5 seconds
+    return () => clearInterval(interval);
+  }, [token, user]);
 
   useEffect(() => {
     const checkAuth = async () => {
@@ -104,14 +130,16 @@ const Navbar = () => {
 
   const navItems = [
     { path: "/dashboard", label: "Главная", icon: Home },
-    { path: "/game", label: "Играть", icon: Gamepad2 },
+    { path: "/games", label: "Игры", icon: Gamepad2 },
     { path: "/shop", label: "Магазин", icon: ShoppingCart },
-    { path: "/transfer", label: "Перевод", icon: ArrowLeftRight },
+    { path: "/leaderboard", label: "Топ", icon: Trophy },
     { path: "/profile", label: "Профиль", icon: User },
   ];
 
+  // Add admin to navbar for admins
+  const allNavItems = [...navItems];
   if (user?.isAdmin) {
-    navItems.push({ path: "/admin", label: "Админ", icon: Shield });
+    allNavItems.push({ path: "/admin", label: "Админ", icon: Shield });
   }
 
   return (
@@ -123,7 +151,7 @@ const Navbar = () => {
           </Link>
 
           <div className="hidden md:flex items-center gap-6">
-            {navItems.map((item) => (
+            {allNavItems.map((item) => (
               <Link
                 key={item.path}
                 to={item.path}
@@ -169,14 +197,14 @@ const Navbar = () => {
       {/* Mobile Nav */}
       <div className="md:hidden fixed bottom-0 left-0 right-0 bg-black/95 backdrop-blur-md border-t border-white/10 py-2 z-50">
         <div className="flex justify-around items-center">
-          {navItems.slice(0, 5).map((item) => (
+          {allNavItems.map((item) => (
             <Link
               key={item.path}
               to={item.path}
-              className={`flex flex-col items-center gap-1 py-2 px-2 ${location.pathname === item.path ? "text-white" : "text-gray-500"}`}
+              className={`flex flex-col items-center gap-1 py-1 px-1 ${location.pathname === item.path ? "text-white" : "text-gray-500"}`}
             >
-              <item.icon size={20} strokeWidth={1.5} />
-              <span className="text-[9px] font-orbitron">{item.label}</span>
+              <item.icon size={18} strokeWidth={1.5} />
+              <span className="text-[8px] font-orbitron">{item.label}</span>
             </Link>
           ))}
         </div>
@@ -496,30 +524,112 @@ const ChestCard = ({ chest }) => {
   const { token, refreshUser } = useAuth();
   const [opening, setOpening] = useState(false);
   const [result, setResult] = useState(null);
+  const [showRoulette, setShowRoulette] = useState(false);
+  const [rouletteItems, setRouletteItems] = useState([]);
+  const [finalReward, setFinalReward] = useState(null);
+  const rouletteRef = useRef(null);
 
   const getChestStyle = (type) => {
     switch(type) {
-      case 'epic': return { color: 'text-purple-400', bg: 'bg-purple-500/10', border: 'border-purple-500/30', name: 'Эпический' };
-      case 'rare': return { color: 'text-blue-400', bg: 'bg-blue-500/10', border: 'border-blue-500/30', name: 'Редкий' };
-      default: return { color: 'text-gray-400', bg: 'bg-white/10', border: 'border-white/30', name: 'Обычный' };
+      case 'epic': return { color: 'text-purple-400', bg: 'bg-purple-500/10', border: 'border-purple-500/30', name: 'Эпический', minCoins: 200, maxCoins: 1000 };
+      case 'rare': return { color: 'text-blue-400', bg: 'bg-blue-500/10', border: 'border-blue-500/30', name: 'Редкий', minCoins: 75, maxCoins: 400 };
+      default: return { color: 'text-gray-400', bg: 'bg-white/10', border: 'border-white/30', name: 'Обычный', minCoins: 10, maxCoins: 150 };
     }
   };
 
   const style = getChestStyle(chest.type);
 
+  // Generate random items for roulette
+  const generateRouletteItems = (min, max, actualReward) => {
+    const items = [];
+    // Generate 50 random values
+    for (let i = 0; i < 50; i++) {
+      items.push(Math.floor(Math.random() * (max - min + 1)) + min);
+    }
+    // Place actual reward at position 42 (where it will stop)
+    items[42] = actualReward;
+    return items;
+  };
+
   const openChest = async () => {
     setOpening(true);
     try {
       const res = await axios.post(`${API}/chest/open`, { chestId: chest.id }, { headers: { Authorization: `Bearer ${token}` } });
+      const reward = res.data.coinsWon;
+      
+      // Generate roulette items
+      const items = generateRouletteItems(style.minCoins, style.maxCoins, reward);
+      setRouletteItems(items);
+      setFinalReward(reward);
+      setShowRoulette(true);
+      
+      // Start animation after a small delay
       setTimeout(() => {
+        if (rouletteRef.current) {
+          rouletteRef.current.style.transition = 'transform 4s cubic-bezier(0.15, 0.85, 0.35, 1)';
+          rouletteRef.current.style.transform = `translateX(-${42 * 120}px)`;
+        }
+      }, 100);
+      
+      // Show result after animation
+      setTimeout(() => {
+        setShowRoulette(false);
         setResult(res.data);
+        toast.success(`Вы выиграли ${res.data.coinsWon} монет!`, { duration: 5000 });
         refreshUser();
-      }, 1500);
+      }, 4500);
+      
     } catch (error) {
       toast.error(error.response?.data?.detail || "Ошибка");
       setOpening(false);
     }
   };
+
+  // Roulette modal
+  if (showRoulette) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90" onClick={(e) => e.stopPropagation()}>
+        <div className="w-full max-w-2xl mx-4">
+          {/* Chest type header */}
+          <div className={`text-center mb-6 font-orbitron text-xl ${style.color}`}>
+            {style.name} сундук
+          </div>
+          
+          {/* Roulette container */}
+          <div className="relative overflow-hidden bg-black/50 border border-white/20 p-4">
+            {/* Center marker */}
+            <div className="absolute top-0 left-1/2 -translate-x-1/2 w-1 h-full bg-yellow-400 z-10 shadow-[0_0_20px_rgba(250,204,21,0.8)]" />
+            <div className="absolute top-0 left-1/2 -translate-x-1/2 w-0 h-0 border-l-[12px] border-r-[12px] border-t-[16px] border-l-transparent border-r-transparent border-t-yellow-400 z-10" />
+            
+            {/* Roulette strip */}
+            <div 
+              ref={rouletteRef}
+              className="flex items-center gap-2 py-4"
+              style={{ transform: 'translateX(300px)' }}
+            >
+              {rouletteItems.map((coins, index) => {
+                return (
+                  <div 
+                    key={index}
+                    className="flex-shrink-0 w-28 h-24 flex flex-col items-center justify-center border bg-white/5 border-white/20"
+                  >
+                    <Coins size={24} className="text-gray-400" />
+                    <span className="font-orbitron text-lg mt-1 text-white">
+                      {coins}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          
+          <div className="text-center mt-4 text-gray-400 text-sm">
+            Крутится...
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (result) {
     return (
@@ -542,7 +652,7 @@ const ChestCard = ({ chest }) => {
 };
 
 // ==================== DODGE GAME ====================
-const DodgeGame = () => {
+const DodgeGameInner = () => {
   const { user, token, refreshUser } = useAuth();
   const canvasRef = useRef(null);
   const [gameState, setGameState] = useState("idle");
@@ -844,12 +954,12 @@ const DodgeGame = () => {
   }, []);
 
   return (
-    <div className="min-h-screen pt-20 pb-24 md:pb-8 px-4 md:px-8" data-testid="game-page">
+    <div className="pb-24 md:pb-8" data-testid="game-page">
       <div className="max-w-4xl mx-auto">
-        <h1 className="font-orbitron text-2xl font-bold text-white tracking-wider mb-2 flex items-center gap-2">
-          <Gamepad2 size={24} /> DODGE АРЕНА
+        <h1 className="font-orbitron text-xl md:text-2xl font-bold text-white tracking-wider mb-2 flex items-center gap-2">
+          <Gamepad2 size={22} /> DODGE АРЕНА
         </h1>
-        <p className="text-gray-500 font-rajdhani mb-6">Уклоняйся от врагов и зарабатывай монеты</p>
+        <p className="text-gray-500 font-rajdhani mb-4 md:mb-6 text-sm md:text-base">Уклоняйся от врагов и зарабатывай монеты</p>
 
         <div className="grid grid-cols-3 gap-4 mb-6">
           <div className="card text-center p-4">
@@ -937,17 +1047,369 @@ const DodgeGame = () => {
   );
 };
 
+// ==================== CLICKER GAME ====================
+const ClickerGameInner = () => {
+  const { user, token, refreshUser } = useAuth();
+  const [clicks, setClicks] = useState(0);
+  const [coinsEarned, setCoinsEarned] = useState(0);
+  const [clickPower, setClickPower] = useState(1);
+  const [autoClickerLevel, setAutoClickerLevel] = useState(0);
+  const [isShaking, setIsShaking] = useState(false);
+  const [intensity, setIntensity] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const clickTimeoutRef = useRef(null);
+  const autoClickerRef = useRef(null);
+
+  // Upgrades prices
+  const upgrades = {
+    clickPower: { name: "Сила клика", basePrice: 500, maxLevel: 10, perLevel: 0.05 }, // +0.05 per level, max 0.5
+    autoClicker: { name: "Автокликер", basePrice: 1000, maxLevel: 5, perLevel: 1 } // 1 click per 3 seconds per level
+  };
+
+  const getUpgradePrice = (type, currentLevel) => {
+    return upgrades[type].basePrice + (currentLevel * 200);
+  };
+
+  const maxCoinsPerClick = 0.05 + (clickPower - 1) * 0.05; // Base 0.05, max 0.5 at level 10
+
+  // Handle click
+  const handleClick = () => {
+    setClicks(prev => prev + 1);
+    const earned = maxCoinsPerClick;
+    setCoinsEarned(prev => prev + earned);
+    
+    // Increase intensity
+    setIntensity(prev => Math.min(100, prev + 5));
+    setIsShaking(true);
+    
+    // Reset shake after short delay
+    if (clickTimeoutRef.current) clearTimeout(clickTimeoutRef.current);
+    clickTimeoutRef.current = setTimeout(() => {
+      setIsShaking(false);
+      setIntensity(prev => Math.max(0, prev - 20));
+    }, 150);
+  };
+
+  // Auto clicker
+  useEffect(() => {
+    if (autoClickerLevel > 0) {
+      autoClickerRef.current = setInterval(() => {
+        setClicks(prev => prev + 1);
+        setCoinsEarned(prev => prev + maxCoinsPerClick);
+      }, 3000 / autoClickerLevel); // Slower: 3 seconds base
+    }
+    return () => {
+      if (autoClickerRef.current) clearInterval(autoClickerRef.current);
+    };
+  }, [autoClickerLevel, maxCoinsPerClick]);
+
+  // Decay intensity over time
+  useEffect(() => {
+    const decay = setInterval(() => {
+      setIntensity(prev => Math.max(0, prev - 2));
+    }, 100);
+    return () => clearInterval(decay);
+  }, []);
+
+  // Buy upgrade
+  const buyUpgrade = async (type) => {
+    const currentLevel = type === 'clickPower' ? clickPower - 1 : autoClickerLevel;
+    if (currentLevel >= upgrades[type].maxLevel) {
+      toast.error("Максимальный уровень!");
+      return;
+    }
+    
+    const price = getUpgradePrice(type, currentLevel);
+    if ((user?.coins || 0) < price) {
+      toast.error("Недостаточно монет!");
+      return;
+    }
+
+    try {
+      await axios.post(`${API}/clicker/upgrade`, { upgradeType: type }, { headers: { Authorization: `Bearer ${token}` } });
+      if (type === 'clickPower') {
+        setClickPower(prev => prev + 1);
+      } else {
+        setAutoClickerLevel(prev => prev + 1);
+      }
+      toast.success(`${upgrades[type].name} улучшен!`);
+      refreshUser();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Ошибка");
+    }
+  };
+
+  // Save coins
+  const saveCoins = async () => {
+    if (coinsEarned < 1) {
+      toast.error("Накопите минимум 1 монету");
+      return;
+    }
+    
+    setSaving(true);
+    try {
+      const res = await axios.post(`${API}/clicker/save`, { coins: Math.floor(coinsEarned) }, { headers: { Authorization: `Bearer ${token}` } });
+      toast.success(`+${res.data.coinsAdded} монет сохранено!`);
+      setCoinsEarned(coinsEarned - Math.floor(coinsEarned)); // Keep decimal part
+      setClicks(0);
+      refreshUser();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Ошибка");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Star gradient based on intensity
+  const getStarStyle = () => {
+    const red = Math.min(255, 150 + intensity);
+    const green = Math.max(0, 100 - intensity);
+    const blue = Math.max(0, 100 - intensity);
+    return {
+      background: `linear-gradient(135deg, rgb(${red}, ${green}, ${blue}), rgb(${Math.min(255, red + 50)}, ${Math.max(0, green - 30)}, ${Math.max(0, blue - 30)}))`,
+      boxShadow: `0 0 ${10 + intensity / 2}px rgba(${red}, ${green / 2}, ${blue / 2}, ${0.3 + intensity / 200})`,
+    };
+  };
+
+  return (
+    <div className="pb-24 md:pb-8">
+      <div className="text-center mb-6 md:mb-8">
+        <h1 className="font-orbitron text-xl md:text-2xl font-bold tracking-wider flex items-center justify-center gap-3">
+          <span className="text-2xl md:text-3xl">⛧</span> КЛИКЕР
+        </h1>
+        <p className="text-gray-400 mt-2 text-sm md:text-base">Кликай и зарабатывай монеты!</p>
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-3 gap-2 md:gap-4 mb-6 md:mb-8">
+        <div className="card text-center p-2 md:p-4">
+          <div className="text-gray-400 text-xs md:text-sm">Кликов</div>
+          <div className="font-orbitron text-lg md:text-2xl">{clicks}</div>
+        </div>
+        <div className="card text-center p-2 md:p-4">
+          <div className="text-gray-400 text-xs md:text-sm">Накоплено</div>
+          <div className="font-orbitron text-lg md:text-2xl text-yellow-400">{coinsEarned.toFixed(2)}</div>
+        </div>
+        <div className="card text-center p-2 md:p-4">
+          <div className="text-gray-400 text-xs md:text-sm">За клик</div>
+          <div className="font-orbitron text-lg md:text-2xl text-green-400">{maxCoinsPerClick.toFixed(2)}</div>
+        </div>
+      </div>
+
+      {/* Clicker Star */}
+      <div className="flex justify-center mb-6 md:mb-8">
+        <button
+          onClick={handleClick}
+          className={`relative w-32 h-32 sm:w-40 sm:h-40 md:w-48 md:h-48 rounded-full flex items-center justify-center transition-all duration-100 cursor-pointer select-none active:scale-95 ${isShaking ? 'animate-shake' : ''}`}
+          style={getStarStyle()}
+          data-testid="clicker-star"
+        >
+          <span 
+            className="text-5xl sm:text-6xl md:text-7xl text-white drop-shadow-lg select-none"
+            style={{
+              transform: isShaking ? `scale(${1 + intensity / 200})` : 'scale(1)',
+              transition: 'transform 0.1s'
+            }}
+          >⛧</span>
+          {intensity > 50 && (
+            <div className="absolute inset-0 rounded-full animate-pulse" style={{
+              background: `radial-gradient(circle, rgba(255,100,100,0.3) 0%, transparent 70%)`,
+            }} />
+          )}
+        </button>
+      </div>
+
+      {/* Intensity bar */}
+      <div className="max-w-md mx-auto mb-6 md:mb-8 px-4">
+        <div className="flex justify-between text-xs md:text-sm text-gray-400 mb-1">
+          <span>Интенсивность</span>
+          <span>{Math.round(intensity)}%</span>
+        </div>
+        <div className="h-2 bg-white/10 rounded-full overflow-hidden">
+          <div 
+            className="h-full transition-all duration-100"
+            style={{ 
+              width: `${intensity}%`,
+              background: `linear-gradient(90deg, #fbbf24, #ef4444)`
+            }}
+          />
+        </div>
+      </div>
+
+      {/* Save button */}
+      <div className="flex justify-center mb-8">
+        <button
+          onClick={saveCoins}
+          disabled={saving || coinsEarned < 1}
+          className="btn-primary px-8 py-3 flex items-center gap-2"
+          data-testid="clicker-save"
+        >
+          <Coins size={18} />
+          {saving ? "..." : `СОХРАНИТЬ ${Math.floor(coinsEarned)}`}
+        </button>
+      </div>
+
+      {/* Upgrades */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 md:gap-6 max-w-2xl mx-auto px-2">
+        <div className="card p-4 md:p-6">
+          <h3 className="font-orbitron text-base md:text-lg mb-3 md:mb-4 flex items-center gap-2">
+            <TrendingUp size={16} /> {upgrades.clickPower.name}
+          </h3>
+          <p className="text-gray-400 text-xs md:text-sm mb-2 md:mb-4">
+            Уровень: {clickPower - 1}/{upgrades.clickPower.maxLevel}
+          </p>
+          <p className="text-gray-500 text-xs md:text-sm mb-3 md:mb-4">
+            +0.05 монет за клик
+          </p>
+          <button
+            onClick={() => buyUpgrade('clickPower')}
+            disabled={clickPower - 1 >= upgrades.clickPower.maxLevel}
+            className="btn-secondary w-full flex items-center justify-center gap-2 text-sm md:text-base py-2 md:py-3"
+          >
+            <Coins size={14} />
+            {clickPower - 1 >= upgrades.clickPower.maxLevel 
+              ? "МАКС" 
+              : `${getUpgradePrice('clickPower', clickPower - 1)}`}
+          </button>
+        </div>
+
+        <div className="card p-4 md:p-6">
+          <h3 className="font-orbitron text-base md:text-lg mb-3 md:mb-4 flex items-center gap-2">
+            <RotateCcw size={16} /> {upgrades.autoClicker.name}
+          </h3>
+          <p className="text-gray-400 text-xs md:text-sm mb-2 md:mb-4">
+            Уровень: {autoClickerLevel}/{upgrades.autoClicker.maxLevel}
+          </p>
+          <p className="text-gray-500 text-xs md:text-sm mb-3 md:mb-4">
+            Клик каждые {autoClickerLevel > 0 ? (3 / autoClickerLevel).toFixed(1) : '∞'} сек
+          </p>
+          <button
+            onClick={() => buyUpgrade('autoClicker')}
+            disabled={autoClickerLevel >= upgrades.autoClicker.maxLevel}
+            className="btn-secondary w-full flex items-center justify-center gap-2 text-sm md:text-base py-2 md:py-3"
+          >
+            <Coins size={14} />
+            {autoClickerLevel >= upgrades.autoClicker.maxLevel 
+              ? "МАКС" 
+              : `${getUpgradePrice('autoClicker', autoClickerLevel)}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ==================== GAMES HUB ====================
+const GamesHub = () => {
+  const [activeGame, setActiveGame] = useState(null); // null, 'dodge', 'clicker'
+
+  return (
+    <div className="main-content">
+      <Navbar />
+      <div className="page-container">
+        {!activeGame && (
+          <>
+            <div className="text-center mb-6 md:mb-8">
+              <h1 className="font-orbitron text-2xl md:text-3xl font-bold tracking-wider flex items-center justify-center gap-3">
+                <Gamepad2 size={28} /> ИГРЫ
+              </h1>
+              <p className="text-gray-400 mt-2 text-sm md:text-base">Выберите игру для заработка монет</p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 md:gap-8 max-w-4xl mx-auto">
+              {/* Dodge Game Card */}
+              <div 
+                className="card cursor-pointer hover:border-white/40 transition-all active:scale-95 md:hover:scale-105 p-4 md:p-8"
+                onClick={() => setActiveGame('dodge')}
+                data-testid="select-dodge"
+              >
+                <div className="w-16 h-16 md:w-20 md:h-20 mx-auto flex items-center justify-center bg-red-500/20 border border-red-500/30 rounded-lg mb-4 md:mb-6">
+                  <Gamepad2 size={32} className="text-red-400" />
+                </div>
+                <h2 className="font-orbitron text-lg md:text-xl text-center mb-2 md:mb-3">DODGE</h2>
+                <p className="text-gray-400 text-center text-sm md:text-base mb-3 md:mb-4">Уворачивайся от врагов!</p>
+                <div className="text-center">
+                  <span className="inline-block px-3 py-1.5 md:px-4 md:py-2 bg-red-500/20 border border-red-500/30 text-red-400 text-xs md:text-sm">
+                    До 50+ монет за игру
+                  </span>
+                </div>
+              </div>
+
+              {/* Clicker Game Card */}
+              <div 
+                className="card cursor-pointer hover:border-white/40 transition-all active:scale-95 md:hover:scale-105 p-4 md:p-8"
+                onClick={() => setActiveGame('clicker')}
+                data-testid="select-clicker"
+              >
+                <div className="w-16 h-16 md:w-20 md:h-20 mx-auto flex items-center justify-center bg-purple-500/20 border border-purple-500/30 rounded-lg mb-4 md:mb-6">
+                  <span className="text-3xl md:text-4xl text-purple-400">⛧</span>
+                </div>
+                <h2 className="font-orbitron text-lg md:text-xl text-center mb-2 md:mb-3">КЛИКЕР</h2>
+                <p className="text-gray-400 text-center text-sm md:text-base mb-3 md:mb-4">Кликай и копи монеты!</p>
+                <div className="text-center">
+                  <span className="inline-block px-3 py-1.5 md:px-4 md:py-2 bg-purple-500/20 border border-purple-500/30 text-purple-400 text-xs md:text-sm">
+                    До 0.5 монет за клик
+                  </span>
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+
+        {activeGame === 'dodge' && (
+          <div className="pt-8 md:pt-4">
+            <button 
+              onClick={() => setActiveGame(null)} 
+              className="mb-4 md:mb-6 flex items-center gap-2 text-gray-400 hover:text-white transition-colors text-sm md:text-base"
+            >
+              <ChevronRight size={16} className="rotate-180" /> Назад к играм
+            </button>
+            <DodgeGameInner />
+          </div>
+        )}
+
+        {activeGame === 'clicker' && (
+          <div className="pt-8 md:pt-4">
+            <button 
+              onClick={() => setActiveGame(null)} 
+              className="mb-4 md:mb-6 flex items-center gap-2 text-gray-400 hover:text-white transition-colors text-sm md:text-base"
+            >
+              <ChevronRight size={16} className="rotate-180" /> Назад к играм
+            </button>
+            <ClickerGameInner />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // ==================== SHOP ====================
 const Shop = () => {
   const { user, token, refreshUser } = useAuth();
   const [purchasing, setPurchasing] = useState(false);
 
   const items = [
-    { key: "custom_role", icon: Award, name: "Кастомная роль", desc: "Создай свою уникальную роль", price: 1000, needsName: true },
-    { key: "custom_gradient", icon: Palette, name: "Градиент роли", desc: "Добавь градиент к своей роли", price: 2000, needsName: true },
-    { key: "create_clan", icon: Users, name: "Создание клана", desc: "Основай свой собственный клан", price: 3000, needsName: true, disabled: !!user?.clan },
-    { key: "clan_category", icon: FolderTree, name: "Категория клана", desc: "Добавь категорию для клана", price: 4000, needsName: false, disabled: !user?.clan || user?.clanCategory },
+    { key: "custom_role", icon: Award, name: "Кастомная роль", desc: "Создай свою уникальную роль", price: 3000, needsName: true },
+    { key: "custom_gradient", icon: Palette, name: "Градиент роли", desc: "Добавь градиент к своей роли", price: 4000, needsName: true },
+    { key: "create_clan", icon: Users, name: "Создание клана", desc: "Основай свой собственный клан", price: 5000, needsName: true, disabled: !!user?.clan },
+    { key: "clan_category", icon: FolderTree, name: "Категория клана", desc: "Добавь категорию для клана", price: 6000, needsName: false, disabled: !user?.clan || user?.clanCategory },
   ];
+
+  const chestItems = [
+    { type: "common", name: "Обычный сундук", desc: "10-150 монет", price: 85, color: "text-gray-400", bg: "bg-white/10", border: "border-white/30" },
+    { type: "rare", name: "Редкий сундук", desc: "75-400 монет", price: 275, color: "text-blue-400", bg: "bg-blue-500/10", border: "border-blue-500/30" },
+    { type: "epic", name: "Эпический сундук", desc: "200-1000 монет", price: 700, color: "text-purple-400", bg: "bg-purple-500/10", border: "border-purple-500/30" },
+  ];
+
+  const getDisabledText = (item) => {
+    if (item.key === "create_clan") return "Уже есть клан";
+    if (item.key === "clan_category") {
+      if (!user?.clan) return "Сначала создайте клан";
+      if (user?.clanCategory) return "Уже куплено";
+    }
+    return "Уже куплено";
+  };
 
   const purchase = async (itemType, needsName, label) => {
     let itemName = null;
@@ -959,6 +1421,17 @@ const Shop = () => {
     try {
       const res = await axios.post(`${API}/shop/purchase`, { itemType, itemName }, { headers: { Authorization: `Bearer ${token}` } });
       toast.success(`Куплено: ${res.data.purchase.item}!`);
+      await refreshUser();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Ошибка покупки");
+    } finally { setPurchasing(false); }
+  };
+
+  const buyChest = async (chestType) => {
+    setPurchasing(true);
+    try {
+      await axios.post(`${API}/shop/buy-chest`, { chestType }, { headers: { Authorization: `Bearer ${token}` } });
+      toast.success(`Сундук добавлен в инвентарь!`);
       await refreshUser();
     } catch (error) {
       toast.error(error.response?.data?.detail || "Ошибка покупки");
@@ -991,7 +1464,7 @@ const Shop = () => {
               <div className="font-orbitron text-lg mb-2">{item.name}</div>
               <div className="text-gray-500 text-sm mb-5 min-h-[40px]">{item.desc}</div>
               {item.disabled ? (
-                <div className="text-gray-500 text-sm">{item.key === "create_clan" ? "Уже есть клан" : "Уже куплено"}</div>
+                <div className="text-gray-500 text-sm">{getDisabledText(item)}</div>
               ) : (
                 <button
                   onClick={() => purchase(item.key, item.needsName, item.name)}
@@ -1002,6 +1475,35 @@ const Shop = () => {
                   {(user?.coins || 0) < item.price ? "НЕДОСТАТОЧНО" : "КУПИТЬ"}
                 </button>
               )}
+            </div>
+          ))}
+        </div>
+
+        {/* Chests section */}
+        <h2 className="font-orbitron text-xl font-bold text-white mt-12 mb-4 tracking-wider flex items-center gap-2">
+          <Box size={20} /> СУНДУКИ
+        </h2>
+        <p className="text-gray-500 font-rajdhani mb-4">Купите сундук и откройте его в профиле</p>
+        <div className="grid sm:grid-cols-3 gap-6 mb-12">
+          {chestItems.map((chest) => (
+            <div key={chest.type} className={`card relative ${chest.bg} ${chest.border}`} data-testid={`shop-chest-${chest.type}`}>
+              <div className="absolute top-4 right-4 flex items-center gap-1 px-3 py-1 bg-black/50 border border-white/10">
+                <Coins size={12} className="text-yellow-400" />
+                <span className="font-orbitron text-sm">{chest.price}</span>
+              </div>
+              <div className={`w-16 h-16 flex items-center justify-center ${chest.bg} border ${chest.border} mb-5`}>
+                <Box size={32} className={chest.color} />
+              </div>
+              <div className={`font-orbitron text-lg mb-2 ${chest.color}`}>{chest.name}</div>
+              <div className="text-gray-500 text-sm mb-5">{chest.desc}</div>
+              <button
+                onClick={() => buyChest(chest.type)}
+                disabled={purchasing || (user?.coins || 0) < chest.price}
+                className="btn-secondary w-full"
+                data-testid={`buy-chest-${chest.type}`}
+              >
+                {(user?.coins || 0) < chest.price ? "НЕДОСТАТОЧНО" : "КУПИТЬ"}
+              </button>
             </div>
           ))}
         </div>
@@ -1028,6 +1530,90 @@ const Shop = () => {
               <div><p className="text-lg mb-2">{user.clan}</p><p className="text-gray-500">{user.clanCategory ? "Категория активна" : "Без категории"}</p></div>
             ) : <p className="text-gray-500">Пока нет</p>}
           </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ==================== LEADERBOARD ====================
+const Leaderboard = () => {
+  const { token } = useAuth();
+  const [leaders, setLeaders] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const loadLeaderboard = async () => {
+    try {
+      const res = await axios.get(`${API}/leaderboard`, { headers: { Authorization: `Bearer ${token}` } });
+      setLeaders(res.data);
+    } catch (error) {
+      toast.error("Ошибка загрузки лидерборда");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadLeaderboard();
+  }, []);
+
+  const getMedalColor = (index) => {
+    if (index === 0) return "text-yellow-400";
+    if (index === 1) return "text-gray-300";
+    if (index === 2) return "text-amber-600";
+    return "text-gray-500";
+  };
+
+  return (
+    <div className="main-content">
+      <Navbar />
+      <div className="page-container">
+        <div className="text-center mb-8">
+          <h1 className="font-orbitron text-2xl md:text-3xl font-bold tracking-wider flex items-center justify-center gap-3">
+            <Trophy size={28} className="text-yellow-400" /> ЛИДЕРБОРД
+          </h1>
+          <p className="text-gray-400 mt-2 text-sm md:text-base">Топ игроков по количеству монет</p>
+        </div>
+
+        <div className="max-w-2xl mx-auto">
+          {loading ? (
+            <div className="text-center text-gray-400 py-12">Загрузка...</div>
+          ) : leaders.length === 0 ? (
+            <div className="text-center text-gray-400 py-12">Пока нет игроков в рейтинге</div>
+          ) : (
+            <div className="space-y-3">
+              {leaders.map((player, index) => (
+                <div 
+                  key={player.id} 
+                  className={`card flex items-center gap-4 p-4 ${index < 3 ? 'border-yellow-500/30' : ''}`}
+                  data-testid={`leader-${index}`}
+                >
+                  <div className={`w-10 h-10 flex items-center justify-center font-orbitron text-xl font-bold ${getMedalColor(index)}`}>
+                    {index < 3 ? (
+                      <Trophy size={24} />
+                    ) : (
+                      <span>{index + 1}</span>
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="font-orbitron text-white truncate">{player.username}</div>
+                    <div className="text-gray-500 text-sm">Уровень {player.level}</div>
+                  </div>
+                  <div className="flex items-center gap-2 px-3 py-1.5 bg-yellow-500/10 border border-yellow-500/30">
+                    <Coins size={16} className="text-yellow-400" />
+                    <span className="font-orbitron text-yellow-400">{player.coins}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <button 
+            onClick={loadLeaderboard}
+            className="btn-secondary w-full mt-6 flex items-center justify-center gap-2"
+          >
+            <RefreshCw size={16} /> ОБНОВИТЬ
+          </button>
         </div>
       </div>
     </div>
@@ -1222,6 +1808,7 @@ const AdminPanel = () => {
   const [coinsAmount, setCoinsAmount] = useState("");
   const [chestTarget, setChestTarget] = useState("");
   const [chestType, setChestType] = useState("common");
+  const [chestCount, setChestCount] = useState(1);
   const [loading, setLoading] = useState(false);
   const [isCreator, setIsCreator] = useState(false);
 
@@ -1251,11 +1838,13 @@ const AdminPanel = () => {
   const handleAddCoins = async (e) => {
     e.preventDefault();
     if (!targetUsername.trim()) { toast.error("Введите имя"); return; }
-    if (!coinsAmount || parseInt(coinsAmount) <= 0) { toast.error("Введите сумму"); return; }
+    const amount = parseInt(coinsAmount);
+    if (!amount || amount <= 0) { toast.error("Введите сумму"); return; }
+    if (amount > 10000) { toast.error("Максимум 10,000 монет за раз"); return; }
 
     setLoading(true);
     try {
-      const res = await axios.post(`${API}/admin/add-coins`, { targetUsername: targetUsername.trim(), amount: parseInt(coinsAmount) }, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await axios.post(`${API}/admin/add-coins`, { targetUsername: targetUsername.trim(), amount }, { headers: { Authorization: `Bearer ${token}` } });
       toast.success(`+${res.data.addedCoins} монет → ${res.data.toUser}`);
       setTargetUsername("");
       setCoinsAmount("");
@@ -1269,12 +1858,17 @@ const AdminPanel = () => {
   const handleGiveChest = async (e) => {
     e.preventDefault();
     if (!chestTarget.trim()) { toast.error("Введите имя"); return; }
+    if (chestCount < 1 || chestCount > 3) { toast.error("Максимум 3 сундука за раз"); return; }
 
     setLoading(true);
     try {
-      const res = await axios.post(`${API}/admin/give-chest`, { targetUsername: chestTarget.trim(), chestType }, { headers: { Authorization: `Bearer ${token}` } });
-      toast.success(`Сундук выдан → ${res.data.toUser}`);
+      // Give multiple chests
+      for (let i = 0; i < chestCount; i++) {
+        await axios.post(`${API}/admin/give-chest`, { targetUsername: chestTarget.trim(), chestType }, { headers: { Authorization: `Bearer ${token}` } });
+      }
+      toast.success(`${chestCount} сундук(ов) выдано → ${chestTarget.trim()}`);
       setChestTarget("");
+      setChestCount(1);
       loadUsers();
       if (chestTarget.trim().toLowerCase() === user?.username.toLowerCase()) await refreshUser();
     } catch (error) {
@@ -1402,10 +1996,14 @@ const AdminPanel = () => {
               <div>
                 <label className="label-text">Тип сундука</label>
                 <select value={chestType} onChange={(e) => setChestType(e.target.value)} className="input-field" data-testid="admin-chest-type">
-                  <option value="common">Обычный (10-50 монет)</option>
-                  <option value="rare">Редкий (50-150 монет)</option>
-                  <option value="epic">Эпический (150-500 монет)</option>
+                  <option value="common">Обычный (10-150 монет)</option>
+                  <option value="rare">Редкий (75-400 монет)</option>
+                  <option value="epic">Эпический (200-1000 монет)</option>
                 </select>
+              </div>
+              <div>
+                <label className="label-text">Количество (макс. 3)</label>
+                <input type="number" min="1" max="3" value={chestCount} onChange={(e) => setChestCount(Math.min(3, Math.max(1, parseInt(e.target.value) || 1)))} className="input-field" data-testid="admin-chest-count" />
               </div>
               <button type="submit" disabled={loading} className="btn-primary w-full flex items-center justify-center gap-2" data-testid="admin-give-chest-btn">
                 <Package size={16} /> {loading ? "..." : "ВЫДАТЬ"}
@@ -1540,8 +2138,9 @@ function AppContent() {
         <Route path="/login" element={user ? <Navigate to="/dashboard" /> : <Login />} />
         <Route path="/register" element={user ? <Navigate to="/dashboard" /> : <Register />} />
         <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
-        <Route path="/game" element={<ProtectedRoute><DodgeGame /></ProtectedRoute>} />
+        <Route path="/games" element={<ProtectedRoute><GamesHub /></ProtectedRoute>} />
         <Route path="/shop" element={<ProtectedRoute><Shop /></ProtectedRoute>} />
+        <Route path="/leaderboard" element={<ProtectedRoute><Leaderboard /></ProtectedRoute>} />
         <Route path="/transfer" element={<ProtectedRoute><Transfer /></ProtectedRoute>} />
         <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
         <Route path="/admin" element={<ProtectedRoute adminOnly><AdminPanel /></ProtectedRoute>} />
