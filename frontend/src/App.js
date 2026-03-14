@@ -1280,53 +1280,6 @@ const ClickerGameInner = () => {
           {saving ? "..." : `СОХРАНИТЬ ${Math.floor(coinsEarned)}`}
         </button>
       </div>
-
-      {/* Upgrades */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 md:gap-6 max-w-2xl mx-auto px-2">
-        <div className="card p-4 md:p-6">
-          <h3 className="font-orbitron text-base md:text-lg mb-3 md:mb-4 flex items-center gap-2">
-            <TrendingUp size={16} /> {upgrades.clickPower.name}
-          </h3>
-          <p className="text-gray-400 text-xs md:text-sm mb-2 md:mb-4">
-            Уровень: {clickPower - 1}/{upgrades.clickPower.maxLevel}
-          </p>
-          <p className="text-gray-500 text-xs md:text-sm mb-3 md:mb-4">
-            +0.05 монет за клик
-          </p>
-          <button
-            onClick={() => buyUpgrade('clickPower')}
-            disabled={clickPower - 1 >= upgrades.clickPower.maxLevel}
-            className="btn-secondary w-full flex items-center justify-center gap-2 text-sm md:text-base py-2 md:py-3"
-          >
-            <Coins size={14} />
-            {clickPower - 1 >= upgrades.clickPower.maxLevel 
-              ? "МАКС" 
-              : `${getUpgradePrice('clickPower', clickPower - 1)}`}
-          </button>
-        </div>
-
-        <div className="card p-4 md:p-6">
-          <h3 className="font-orbitron text-base md:text-lg mb-3 md:mb-4 flex items-center gap-2">
-            <RotateCcw size={16} /> {upgrades.autoClicker.name}
-          </h3>
-          <p className="text-gray-400 text-xs md:text-sm mb-2 md:mb-4">
-            Уровень: {autoClickerLevel}/{upgrades.autoClicker.maxLevel}
-          </p>
-          <p className="text-gray-500 text-xs md:text-sm mb-3 md:mb-4">
-            Клик каждые {autoClickerLevel > 0 ? (3 / autoClickerLevel).toFixed(1) : '∞'} сек
-          </p>
-          <button
-            onClick={() => buyUpgrade('autoClicker')}
-            disabled={autoClickerLevel >= upgrades.autoClicker.maxLevel}
-            className="btn-secondary w-full flex items-center justify-center gap-2 text-sm md:text-base py-2 md:py-3"
-          >
-            <Coins size={14} />
-            {autoClickerLevel >= upgrades.autoClicker.maxLevel 
-              ? "МАКС" 
-              : `${getUpgradePrice('autoClicker', autoClickerLevel)}`}
-          </button>
-        </div>
-      </div>
     </div>
   );
 };
