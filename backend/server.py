@@ -238,10 +238,10 @@ async def submit_game_result(data: GameResult, user: dict = Depends(get_current_
 
 # ==================== SHOP ROUTES ====================
 SHOP_ITEMS = {
-    "custom_role": {"price": 1000, "name": "Кастомная роль"},
-    "custom_gradient": {"price": 2000, "name": "Градиент для роли"},
-    "create_clan": {"price": 3000, "name": "Создание клана"},
-    "clan_category": {"price": 4000, "name": "Категория клана"}
+    "custom_role": {"price": 3000, "name": "Кастомная роль"},
+    "custom_gradient": {"price": 4000, "name": "Градиент для роли"},
+    "create_clan": {"price": 5000, "name": "Создание клана"},
+    "clan_category": {"price": 6000, "name": "Категория клана"}
 }
 
 @api_router.get("/shop/items")
