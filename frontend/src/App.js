@@ -537,7 +537,7 @@ const Dashboard = () => {
         </h2>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {[
-            { to: "/game", icon: Gamepad2, title: "ИГРАТЬ", desc: "Фармить монеты" },
+            { to: "/games", icon: Gamepad2, title: "ИГРАТЬ", desc: "Фармить монеты" },
             { to: "/shop", icon: ShoppingCart, title: "МАГАЗИН", desc: "Покупать предметы" },
             { to: "/transfer", icon: ArrowLeftRight, title: "ПЕРЕВОД", desc: "Отправить монеты" },
             { to: "/profile", icon: User, title: "ПРОФИЛЬ", desc: "Ваша статистика" },
