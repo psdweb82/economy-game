@@ -6,7 +6,7 @@ import {
   Home, Gamepad2, ShoppingCart, ArrowLeftRight, User, Shield, LogOut, 
   Coins, TrendingUp, Award, Users, Sun, Star, Package, Gift, 
   Send, Plus, RefreshCw, Eye, EyeOff, ChevronRight, Play, RotateCcw,
-  Palette, FolderTree, Search, Clock, History, Box, Trophy
+  Palette, FolderTree, Search, Clock, History, Box, Trophy, Trash2
 } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -2189,6 +2189,7 @@ const AdminPanel = () => {
   const [users, setUsers] = useState([]);
   const [targetUsername, setTargetUsername] = useState("");
   const [coinsAmount, setCoinsAmount] = useState("");
+  const [deleteUsername, setDeleteUsername] = useState("");
   const [chestTarget, setChestTarget] = useState("");
   const [chestType, setChestType] = useState("common");
   const [chestCount, setChestCount] = useState(1);
@@ -2257,6 +2258,30 @@ const AdminPanel = () => {
       if (targetUsername.trim().toLowerCase() === user?.username.toLowerCase()) await refreshUser();
     } catch (error) {
       toast.error(error.response?.data?.detail || "Ошибка");
+    } finally { setLoading(false); }
+  };
+
+  const handleDeleteUser = async (e) => {
+    e.preventDefault();
+    if (!deleteUsername.trim()) { toast.error("Введите имя пользователя для удаления"); return; }
+
+    const confirmation = window.prompt(
+      `⚠️ ВНИМАНИЕ! Вы собираетесь ПОЛНОСТЬЮ удалить пользователя "${deleteUsername.trim()}" из базы данных.\n\nЭто действие НЕОБРАТИМО!\n\nВведите "УДАЛИТЬ" для подтверждения:`
+    );
+
+    if (confirmation !== "УДАЛИТЬ") {
+      toast.info("Удаление отменено");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await axios.post(`${API}/admin/delete-user`, { targetUsername: deleteUsername.trim() }, { headers: { Authorization: `Bearer ${token}` } });
+      toast.success(res.data.message);
+      setDeleteUsername("");
+      loadUsers();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Ошибка при удалении");
     } finally { setLoading(false); }
   };
 
@@ -2433,6 +2458,49 @@ const AdminPanel = () => {
                 ))}
               </div>
             </div>
+          </div>
+        </div>
+
+        {/* Delete User Block */}
+        <div className="card mb-8">
+          <h2 className="font-orbitron text-lg mb-6 flex items-center gap-2 text-red-400">
+            <Trash2 size={18} /> УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ
+          </h2>
+          <div className="bg-red-500/10 border border-red-500/30 p-4 mb-4 text-sm">
+            <p className="text-red-400 font-bold mb-2">⚠️ ВНИМАНИЕ!</p>
+            <ul className="text-gray-400 space-y-1 list-disc list-inside">
+              <li>Пользователь будет ПОЛНОСТЬЮ удален из базы данных</li>
+              <li>Невозможно удалить создателя (pseudotamine) и админов</li>
+              <li>После удаления можно зарегистрироваться под этим ником</li>
+              <li>Действие НЕОБРАТИМО - восстановление невозможно</li>
+            </ul>
+          </div>
+          <form onSubmit={handleDeleteUser} className="space-y-4">
+            <div>
+              <label className="label-text">Имя пользователя для удаления</label>
+              <input 
+                type="text" 
+                value={deleteUsername} 
+                onChange={(e) => setDeleteUsername(e.target.value)} 
+                className="input-field" 
+                placeholder="Введите имя пользователя" 
+                data-testid="admin-delete-username" 
+              />
+            </div>
+            <button 
+              type="submit" 
+              disabled={loading || !deleteUsername.trim()} 
+              className="btn-secondary w-full flex items-center justify-center gap-2 border-red-500/30 text-red-400 hover:bg-red-500/10" 
+              data-testid="admin-delete-user-btn"
+            >
+              <Trash2 size={16} /> {loading ? "..." : "УДАЛИТЬ ПОЛЬЗОВАТЕЛЯ"}
+            </button>
+          </form>
+          <div className="mt-4 pt-4 border-t border-white/10">
+            <p className="text-gray-500 text-sm">
+              <span className="text-yellow-400">💡 Защита от мультиаккаунтов:</span>
+              <br />Максимум 3 регистрации с одного IP за 24 часа. Cooldown: 10 минут между регистрациями.
+            </p>
           </div>
         </div>
 
