@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -57,6 +57,9 @@ class AdminAddCoins(BaseModel):
     targetUsername: str
     amount: int
 
+class AdminDeleteUser(BaseModel):
+    targetUsername: str
+
 class BonusRequest(BaseModel):
     bonusType: str
 
@@ -112,7 +115,37 @@ def calculate_level(xp: int) -> int:
 
 # ==================== AUTH ROUTES ====================
 @api_router.post("/auth/register")
-async def register(data: UserRegister):
+async def register(data: UserRegister, request: Request):
+    # Multi-account protection: Check IP address
+    client_ip = request.client.host if request.client else "unknown"
+    
+    # Check how many accounts created from this IP in last 24 hours
+    twenty_four_hours_ago = datetime.now(timezone.utc) - timedelta(hours=24)
+    recent_accounts = await db.users.count_documents({
+        "registrationIP": client_ip,
+        "createdAt": {"$gte": twenty_four_hours_ago.isoformat()}
+    })
+    
+    # Limit: Max 3 accounts per IP per 24 hours
+    if recent_accounts >= 3:
+        raise HTTPException(
+            status_code=429, 
+            detail="Превышен лимит регистраций. Попробуйте позже."
+        )
+    
+    # Check last registration time from this IP (cooldown: 10 minutes)
+    ten_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=10)
+    recent_registration = await db.users.find_one({
+        "registrationIP": client_ip,
+        "createdAt": {"$gte": ten_minutes_ago.isoformat()}
+    })
+    
+    if recent_registration:
+        raise HTTPException(
+            status_code=429,
+            detail="Подождите 10 минут перед следующей регистрацией"
+        )
+    
     existing = await db.users.find_one({"username": {"$regex": f"^{data.username}$", "$options": "i"}})
     if existing:
         raise HTTPException(status_code=400, detail="Это имя пользователя уже занято")
@@ -141,13 +174,14 @@ async def register(data: UserRegister):
         "lastDailyBonus": None,
         "lastWeeklyBonus": None,
         "chests": [],
+        "registrationIP": client_ip,
         "createdAt": datetime.now(timezone.utc).isoformat()
     }
     
     await db.users.insert_one(user)
     token = create_token(user_id, data.username, False)
     
-    user_response = {k: v for k, v in user.items() if k not in ["passwordHash", "_id"]}
+    user_response = {k: v for k, v in user.items() if k not in ["passwordHash", "_id", "registrationIP"]}
     return {"token": token, "user": user_response}
 
 @api_router.post("/auth/login")
@@ -432,6 +466,35 @@ async def admin_remove_coins(data: AdminAddCoins, user: dict = Depends(get_curre
     await db.users.update_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"$set": {"coins": new_balance}})
     
     return {"success": True, "removedCoins": actual_removed, "fromUser": target["username"], "newBalance": new_balance}
+
+@api_router.post("/admin/delete-user")
+async def admin_delete_user(data: AdminDeleteUser, user: dict = Depends(get_current_user)):
+    if not user.get("isAdmin"):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    
+    # Find target user
+    target = await db.users.find_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    
+    # Protection: Cannot delete creator or admins
+    if target["username"].lower() == "pseudotamine":
+        raise HTTPException(status_code=403, detail="Невозможно удалить создателя проекта")
+    
+    if target.get("isAdmin", False):
+        raise HTTPException(status_code=403, detail="Невозможно удалить администратора")
+    
+    # Delete user completely from database
+    result = await db.users.delete_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}})
+    
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=500, detail="Ошибка при удалении")
+    
+    return {
+        "success": True,
+        "deletedUser": target["username"],
+        "message": f"Пользователь {target['username']} полностью удалён"
+    }
 
 @api_router.get("/admin/users")
 async def admin_get_users(user: dict = Depends(get_current_user)):
