@@ -1285,7 +1285,8 @@ const CrashGameInner = () => {
     crashPoint: 0, 
     crashTime: 0,
     path: [],
-    currentMultiplier: 1.0 
+    currentMultiplier: 1.0,
+    lastChange: 0
   });
 
   const quickBets = [100, 500, 1000, 3000, 5000];
@@ -1330,29 +1331,41 @@ const CrashGameInner = () => {
         const elapsed = Date.now() - g.startTime;
         const progress = Math.min(elapsed / g.crashTime, 1);
 
-        // Smooth movement towards crash point with reduced variance
-        const targetMultiplier = 1.0 + (g.crashPoint - 1.0) * progress;
+        // UNPREDICTABLE MOVEMENT - like real casino!
+        // Graph moves randomly until the very end
         
-        // Much smaller variance for smoother line (±3% instead of ±20%)
-        const variance = (Math.random() - 0.5) * 0.06;
-        let newMultiplier = g.currentMultiplier + variance;
-        
-        // Stronger bias toward target for smoother convergence
-        const bias = (targetMultiplier - g.currentMultiplier) * 0.15;
-        newMultiplier += bias;
-        
-        // Clamp to reasonable range
-        newMultiplier = Math.max(0.1, Math.min(25, newMultiplier));
-        
-        g.currentMultiplier = newMultiplier;
+        if (progress < 0.85) {
+          // First 85% - completely random movement
+          // Can go up and down, making it impossible to predict
+          const randomChange = (Math.random() - 0.5) * 0.4; // Bigger random jumps
+          let newMultiplier = g.currentMultiplier + randomChange;
+          
+          // Add some momentum - if going up, tend to keep going up (and vice versa)
+          const momentum = g.lastChange || 0;
+          newMultiplier += momentum * 0.3;
+          g.lastChange = randomChange;
+          
+          // Randomly jump between 0.3x and 3x during this phase
+          newMultiplier = Math.max(0.3, Math.min(3, newMultiplier));
+          
+          g.currentMultiplier = newMultiplier;
+        } else {
+          // Last 15% - dramatic move to final result!
+          // This is where the "surprise" happens
+          const endProgress = (progress - 0.85) / 0.15; // 0 to 1 in last 15%
+          
+          // Smooth transition to actual crash point
+          const targetMultiplier = g.crashPoint;
+          g.currentMultiplier = g.currentMultiplier + (targetMultiplier - g.currentMultiplier) * endProgress * 0.5;
+        }
         
         // Add point less frequently for smoother line (every 50ms worth of progress)
         if (g.path.length === 0 || elapsed - (g.path[g.path.length - 1].time || 0) > 50) {
-          g.path.push({ x: progress, y: newMultiplier, time: elapsed });
+          g.path.push({ x: progress, y: g.currentMultiplier, time: elapsed });
         }
 
         // Update display
-        setMultiplier(newMultiplier);
+        setMultiplier(g.currentMultiplier);
 
         // Draw graph
         drawGraph(g.path, progress);
@@ -1364,21 +1377,31 @@ const CrashGameInner = () => {
           g.currentMultiplier = g.crashPoint;
           setMultiplier(g.crashPoint);
           setGameState("crashed");
-          setResult(res.data);
           setPlaying(false);
-          refreshUser();
 
-          if (res.data.won === true) {
-            toast.success(`ВЫИГРЫШ! ${g.crashPoint}x = +${res.data.profit} монет!`, { duration: 5000 });
-          } else if (res.data.won === false) {
-            toast.error(`ПРОИГРЫШ! ${g.crashPoint}x`, { duration: 3000 });
-          } else {
-            toast.info(`НИЧЬЯ! ${g.crashPoint}x - ставка возвращена`, { duration: 3000 });
-          }
+          // Complete the game on backend
+          (async () => {
+            try {
+              const completeRes = await axios.post(`${API}/crash/complete`, {}, { headers: { Authorization: `Bearer ${token}` } });
+              setResult(completeRes.data);
+              refreshUser();
+
+              if (completeRes.data.won === true) {
+                toast.success(`ВЫИГРЫШ! ${completeRes.data.crashMultiplier}x = +${completeRes.data.profit} монет!`, { duration: 5000 });
+              } else if (completeRes.data.won === false) {
+                toast.error(`ПРОИГРЫШ! ${completeRes.data.crashMultiplier}x`, { duration: 3000 });
+              } else {
+                toast.info(`НИЧЬЯ! ${completeRes.data.crashMultiplier}x - ставка возвращена`, { duration: 3000 });
+              }
+            } catch (error) {
+              toast.error("Ошибка завершения игры");
+            }
+          })();
         }
-      }, 16); // ~60 FPS
+      }, 50); // setInterval runs every 50ms
     } catch (error) {
-      toast.error(error.response?.data?.detail || "Ошибка");
+      const errorMsg = error.response?.data?.detail || "Ошибка";
+      toast.error(errorMsg);
       setPlaying(false);
       setGameState("idle");
     }
@@ -1761,10 +1784,10 @@ const Shop = () => {
   const [purchasing, setPurchasing] = useState(false);
 
   const items = [
-    { key: "custom_role", icon: Award, name: "Кастомная роль", desc: "Создай свою уникальную роль", price: 60000, needsName: true },
-    { key: "custom_gradient", icon: Palette, name: "Градиент роли", desc: "Добавь градиент к своей роли", price: 80000, needsName: true },
-    { key: "create_clan", icon: Users, name: "Создание клана", desc: "Основай свой собственный клан", price: 150000, needsName: true, disabled: !!user?.clan },
-    { key: "clan_category", icon: FolderTree, name: "Категория клана", desc: "Добавь категорию для клана", price: 210000, needsName: false, disabled: !user?.clan || user?.clanCategory },
+    { key: "custom_role", icon: Award, name: "Кастомная роль", desc: "Создай свою уникальную роль", price: 20000, needsName: true },
+    { key: "custom_gradient", icon: Palette, name: "Градиент роли", desc: "Добавь градиент к своей роли", price: 25000, needsName: true },
+    { key: "create_clan", icon: Users, name: "Создание клана", desc: "Основай свой собственный клан", price: 70000, needsName: true, disabled: !!user?.clan },
+    { key: "clan_category", icon: FolderTree, name: "Категория клана", desc: "Добавь категорию для клана", price: 80000, needsName: false, disabled: !user?.clan || user?.clanCategory },
   ];
 
   const chestItems = [
@@ -2052,14 +2075,14 @@ const Transfer = () => {
         </div>
 
         {/* Level requirement warning */}
-        {user && !user.isAdmin && user.username.toLowerCase() !== 'pseudotamine' && (user.level || 1) < 30 && (
+        {user && !user.isAdmin && user.username.toLowerCase() !== 'pseudotamine' && (user.level || 1) < 10 && (
           <div className="card mb-6 bg-yellow-500/10 border-yellow-500/30">
             <div className="flex items-start gap-3">
               <div className="text-yellow-400 text-2xl">⚠️</div>
               <div>
                 <h3 className="text-yellow-400 font-bold mb-1">Переводы недоступны</h3>
                 <p className="text-gray-400 text-sm">
-                  Для разблокировки переводов нужен <span className="text-white font-bold">30 уровень</span>.
+                  Для разблокировки переводов нужен <span className="text-white font-bold">10 уровень</span>.
                   Ваш текущий уровень: <span className="text-yellow-400">{user.level || 1}</span>
                 </p>
               </div>
@@ -2262,7 +2285,7 @@ const AdminPanel = () => {
     if (!targetUsername.trim()) { toast.error("Введите имя"); return; }
     const amount = parseInt(coinsAmount);
     if (!amount || amount <= 0) { toast.error("Введите сумму"); return; }
-    if (amount > 10000) { toast.error("Максимум 10,000 монет за раз"); return; }
+    // No limit on removing coins for admins
 
     if (!window.confirm(`Снять ${amount} монет у ${targetUsername.trim()}?`)) return;
 
@@ -2553,7 +2576,7 @@ const AdminPanel = () => {
               <li>Установить уровень от 1 до 100 любому пользователю</li>
               <li>XP автоматически синхронизируется с новым уровнем</li>
               <li>Требование для следующего уровня рассчитывается автоматически</li>
-              <li>Переводы доступны с 30 уровня (кроме админов)</li>
+              <li>Переводы доступны с 10 уровня (кроме админов)</li>
             </ul>
           </div>
           <form onSubmit={handleSetLevel} className="space-y-4">
