@@ -701,6 +701,8 @@ const DodgeGameInner = () => {
     animationId: null,
     spawnInterval: null,
     speedMultiplier: 1,
+    paused: false,
+    pausedTime: 0,
   });
 
   const keysRef = useRef({ up: false, down: false, left: false, right: false });
@@ -794,6 +796,7 @@ const DodgeGameInner = () => {
   const startGame = useCallback(() => {
     const g = gameRef.current;
     g.running = true;
+    g.paused = false;
     g.player = { x: 300, y: 350, size: 15 };
     g.enemies = [];
     g.startTime = Date.now();
@@ -809,7 +812,7 @@ const DodgeGameInner = () => {
     // Spawn enemies - starts faster, gets even faster
     let spawnRate = 1200;
     const scheduleSpawn = () => {
-      if (!g.running) return;
+      if (!g.running || g.paused) return;
       spawnEnemy();
       // Decrease spawn rate as score increases
       spawnRate = Math.max(400, 1200 - g.score * 15);
@@ -819,7 +822,7 @@ const DodgeGameInner = () => {
 
     // Game loop
     const loop = () => {
-      if (!g.running) return;
+      if (!g.running || g.paused) return;
       
       const keys = keysRef.current;
       const touch = touchRef.current;
@@ -975,6 +978,194 @@ const DodgeGameInner = () => {
     }
   }, [gameState]);
 
+  // Page Visibility API - pause game when tab is hidden
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      const g = gameRef.current;
+      if (!g.running) return;
+      
+      if (document.hidden) {
+        // Tab became hidden - pause the game
+        g.paused = true;
+        g.pausedTime = Date.now();
+        
+        // Stop spawn interval
+        if (g.spawnInterval) {
+          clearTimeout(g.spawnInterval);
+          g.spawnInterval = null;
+        }
+        
+        // Cancel animation frame
+        if (g.animationId) {
+          cancelAnimationFrame(g.animationId);
+          g.animationId = null;
+        }
+      } else {
+        // Tab became visible - resume the game
+        if (g.paused) {
+          g.paused = false;
+          
+          // Adjust start time to account for paused duration
+          const pauseDuration = Date.now() - g.pausedTime;
+          g.startTime += pauseDuration;
+          
+          // Clear any existing enemies to prevent spam
+          g.enemies = [];
+          
+          // Restart spawn interval
+          let spawnRate = Math.max(400, 1200 - g.score * 15);
+          const scheduleSpawn = () => {
+            if (!g.running || g.paused) return;
+            
+            // Spawn enemy logic (inlined to avoid dependency issues)
+            const player = g.player;
+            const targetPlayer = Math.random() < 0.7;
+            let x, vx, vy;
+            
+            if (targetPlayer) {
+              x = Math.random() * 600;
+              const dx = player.x - x;
+              const dy = player.y + 50;
+              const dist = Math.sqrt(dx * dx + dy * dy);
+              const baseSpeed = (2 + Math.random() * 2) * g.speedMultiplier;
+              vx = (dx / dist) * baseSpeed * 0.5;
+              vy = (dy / dist) * baseSpeed;
+            } else {
+              x = Math.random() * 540 + 30;
+              vx = (Math.random() - 0.5) * 2;
+              vy = (2 + Math.random() * 2) * g.speedMultiplier;
+            }
+            
+            g.enemies.push({
+              x,
+              y: -20,
+              size: 18 + Math.random() * 12,
+              vx,
+              vy,
+            });
+            
+            spawnRate = Math.max(400, 1200 - g.score * 15);
+            g.spawnInterval = setTimeout(scheduleSpawn, spawnRate);
+          };
+          g.spawnInterval = setTimeout(scheduleSpawn, spawnRate);
+          
+          // Resume game loop (main loop will continue via startGame)
+          const canvas = canvasRef.current;
+          const resumeLoop = () => {
+            if (!g.running || g.paused) return;
+            
+            const keys = keysRef.current;
+            const touch = touchRef.current;
+            const speed = 6;
+
+            // Keyboard movement
+            if (keys.up && g.player.y > g.player.size) g.player.y -= speed;
+            if (keys.down && g.player.y < 400 - g.player.size) g.player.y += speed;
+            if (keys.left && g.player.x > g.player.size) g.player.x -= speed;
+            if (keys.right && g.player.x < 600 - g.player.size) g.player.x += speed;
+
+            // Touch movement
+            if (touch.x !== null && touch.y !== null) {
+              const dx = touch.x - g.player.x;
+              const dy = touch.y - g.player.y;
+              const dist = Math.sqrt(dx * dx + dy * dy);
+              if (dist > 5) {
+                g.player.x += (dx / dist) * speed;
+                g.player.y += (dy / dist) * speed;
+              }
+            }
+
+            // Constrain player
+            g.player.x = Math.max(g.player.size, Math.min(600 - g.player.size, g.player.x));
+            g.player.y = Math.max(g.player.size, Math.min(400 - g.player.size, g.player.y));
+
+            // Speed increases
+            if (g.score >= 50) g.speedMultiplier = 1.5;
+            if (g.score >= 100) g.speedMultiplier = 2;
+            if (g.score >= 150) g.speedMultiplier = 2.5;
+
+            // Update enemies
+            let collision = false;
+            g.enemies = g.enemies.filter((e) => {
+              e.x += e.vx;
+              e.y += e.vy;
+              
+              if (e.x < e.size/2 || e.x > 600 - e.size/2) e.vx *= -1;
+              
+              const dx = g.player.x - e.x;
+              const dy = g.player.y - e.y;
+              if (Math.sqrt(dx * dx + dy * dy) < (g.player.size + e.size) / 2) {
+                collision = true;
+              }
+              
+              if (e.y > 420) {
+                g.score++;
+                setScore(g.score);
+                return false;
+              }
+              return true;
+            });
+
+            // Draw
+            if (canvas) {
+              const ctx = canvas.getContext("2d");
+              ctx.fillStyle = "#050505";
+              ctx.fillRect(0, 0, 600, 400);
+              ctx.strokeStyle = "rgba(255, 255, 255, 0.03)";
+              ctx.lineWidth = 1;
+              for (let i = 0; i < 600; i += 30) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, 400); ctx.stroke(); }
+              for (let i = 0; i < 400; i += 30) { ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(600, i); ctx.stroke(); }
+
+              g.enemies.forEach((e) => {
+                ctx.fillStyle = "rgba(239, 68, 68, 0.9)";
+                ctx.shadowColor = "#EF4444";
+                ctx.shadowBlur = 15;
+                ctx.fillRect(e.x - e.size/2, e.y - e.size/2, e.size, e.size);
+              });
+
+              ctx.fillStyle = "#FFFFFF";
+              ctx.shadowColor = "#FFFFFF";
+              ctx.shadowBlur = 20;
+              ctx.beginPath();
+              ctx.moveTo(g.player.x, g.player.y - g.player.size);
+              ctx.lineTo(g.player.x - g.player.size, g.player.y + g.player.size);
+              ctx.lineTo(g.player.x + g.player.size, g.player.y + g.player.size);
+              ctx.closePath();
+              ctx.fill();
+              ctx.shadowBlur = 0;
+
+              ctx.fillStyle = "#FFFFFF";
+              ctx.font = "bold 16px Orbitron, monospace";
+              ctx.textAlign = "left";
+              ctx.fillText(`СЧЁТ: ${g.score}`, 20, 30);
+              ctx.fillText(`СКОРОСТЬ: x${g.speedMultiplier.toFixed(1)}`, 20, 55);
+              
+              const elapsed = Math.floor((Date.now() - g.startTime) / 1000);
+              ctx.textAlign = "right";
+              ctx.fillText(`ВРЕМЯ: ${elapsed}с`, 580, 30);
+            }
+
+            if (collision) {
+              g.running = false;
+              clearTimeout(g.spawnInterval);
+              cancelAnimationFrame(g.animationId);
+              setGameState("ended");
+            } else {
+              g.animationId = requestAnimationFrame(resumeLoop);
+            }
+          };
+          g.animationId = requestAnimationFrame(resumeLoop);
+        }
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
   // Cleanup
   useEffect(() => {
     return () => {
@@ -1080,205 +1271,400 @@ const DodgeGameInner = () => {
 };
 
 // ==================== CLICKER GAME ====================
-const ClickerGameInner = () => {
+const CrashGameInner = () => {
   const { user, token, refreshUser } = useAuth();
-  const [clicks, setClicks] = useState(0);
-  const [coinsEarned, setCoinsEarned] = useState(0);
-  const [clickPower, setClickPower] = useState(1);
-  const [autoClickerLevel, setAutoClickerLevel] = useState(0);
-  const [isShaking, setIsShaking] = useState(false);
-  const [intensity, setIntensity] = useState(0);
-  const [saving, setSaving] = useState(false);
-  const clickTimeoutRef = useRef(null);
-  const autoClickerRef = useRef(null);
+  const [betAmount, setBetAmount] = useState(100);
+  const [gameState, setGameState] = useState("idle"); // idle, playing, crashed
+  const [multiplier, setMultiplier] = useState(1.0);
+  const [result, setResult] = useState(null);
+  const [playing, setPlaying] = useState(false);
+  const canvasRef = useRef(null);
+  const gameRef = useRef({ 
+    running: false, 
+    startTime: 0, 
+    crashPoint: 0, 
+    crashTime: 0,
+    path: [],
+    currentMultiplier: 1.0 
+  });
 
-  // Upgrades prices
-  const upgrades = {
-    clickPower: { name: "Сила клика", basePrice: 500, maxLevel: 10, perLevel: 0.05 }, // +0.05 per level, max 0.5
-    autoClicker: { name: "Автокликер", basePrice: 1000, maxLevel: 5, perLevel: 1 } // 1 click per 3 seconds per level
-  };
+  const quickBets = [100, 500, 1000, 3000, 5000];
 
-  const getUpgradePrice = (type, currentLevel) => {
-    return upgrades[type].basePrice + (currentLevel * 200);
-  };
-
-  const maxCoinsPerClick = 0.05 + (clickPower - 1) * 0.05; // Base 0.05, max 0.5 at level 10
-
-  // Handle click
-  const handleClick = () => {
-    setClicks(prev => prev + 1);
-    const earned = maxCoinsPerClick;
-    setCoinsEarned(prev => prev + earned);
-    
-    // Increase intensity
-    setIntensity(prev => Math.min(100, prev + 5));
-    setIsShaking(true);
-    
-    // Reset shake after short delay
-    if (clickTimeoutRef.current) clearTimeout(clickTimeoutRef.current);
-    clickTimeoutRef.current = setTimeout(() => {
-      setIsShaking(false);
-      setIntensity(prev => Math.max(0, prev - 20));
-    }, 150);
-  };
-
-  // Auto clicker
-  useEffect(() => {
-    if (autoClickerLevel > 0) {
-      autoClickerRef.current = setInterval(() => {
-        setClicks(prev => prev + 1);
-        setCoinsEarned(prev => prev + maxCoinsPerClick);
-      }, 3000 / autoClickerLevel); // Slower: 3 seconds base
-    }
-    return () => {
-      if (autoClickerRef.current) clearInterval(autoClickerRef.current);
-    };
-  }, [autoClickerLevel, maxCoinsPerClick]);
-
-  // Decay intensity over time
-  useEffect(() => {
-    const decay = setInterval(() => {
-      setIntensity(prev => Math.max(0, prev - 2));
-    }, 100);
-    return () => clearInterval(decay);
-  }, []);
-
-  // Buy upgrade
-  const buyUpgrade = async (type) => {
-    const currentLevel = type === 'clickPower' ? clickPower - 1 : autoClickerLevel;
-    if (currentLevel >= upgrades[type].maxLevel) {
-      toast.error("Максимальный уровень!");
+  const startGame = async () => {
+    if (betAmount < 10 || betAmount > 50000) {
+      toast.error("Ставка от 10 до 50000 монет");
       return;
     }
-    
-    const price = getUpgradePrice(type, currentLevel);
-    if ((user?.coins || 0) < price) {
+
+    if ((user?.coins || 0) < betAmount) {
       toast.error("Недостаточно монет!");
       return;
     }
 
+    setPlaying(true);
+    setResult(null);
+
     try {
-      await axios.post(`${API}/clicker/upgrade`, { upgradeType: type }, { headers: { Authorization: `Bearer ${token}` } });
-      if (type === 'clickPower') {
-        setClickPower(prev => prev + 1);
-      } else {
-        setAutoClickerLevel(prev => prev + 1);
-      }
-      toast.success(`${upgrades[type].name} улучшен!`);
-      refreshUser();
+      const res = await axios.post(`${API}/crash/play`, { betAmount }, { headers: { Authorization: `Bearer ${token}` } });
+      
+      // Start animation
+      setGameState("playing");
+      setMultiplier(1.0);
+      
+      const g = gameRef.current;
+      g.running = true;
+      g.startTime = Date.now();
+      g.crashPoint = res.data.crashMultiplier;
+      g.crashTime = res.data.crashTime * 1000; // Convert to ms
+      g.path = [{x: 0, y: 1.0}];
+      g.currentMultiplier = 1.0;
+
+      // Animate graph with smooth random movement
+      // Use setInterval for stable animation even when tab is hidden
+      const intervalId = setInterval(() => {
+        if (!g.running) {
+          clearInterval(intervalId);
+          return;
+        }
+
+        const elapsed = Date.now() - g.startTime;
+        const progress = Math.min(elapsed / g.crashTime, 1);
+
+        // Smooth movement towards crash point with reduced variance
+        const targetMultiplier = 1.0 + (g.crashPoint - 1.0) * progress;
+        
+        // Much smaller variance for smoother line (±3% instead of ±20%)
+        const variance = (Math.random() - 0.5) * 0.06;
+        let newMultiplier = g.currentMultiplier + variance;
+        
+        // Stronger bias toward target for smoother convergence
+        const bias = (targetMultiplier - g.currentMultiplier) * 0.15;
+        newMultiplier += bias;
+        
+        // Clamp to reasonable range
+        newMultiplier = Math.max(0.1, Math.min(25, newMultiplier));
+        
+        g.currentMultiplier = newMultiplier;
+        
+        // Add point less frequently for smoother line (every 50ms worth of progress)
+        if (g.path.length === 0 || elapsed - (g.path[g.path.length - 1].time || 0) > 50) {
+          g.path.push({ x: progress, y: newMultiplier, time: elapsed });
+        }
+
+        // Update display
+        setMultiplier(newMultiplier);
+
+        // Draw graph
+        drawGraph(g.path, progress);
+
+        if (progress >= 1) {
+          // Crash!
+          clearInterval(intervalId);
+          g.running = false;
+          g.currentMultiplier = g.crashPoint;
+          setMultiplier(g.crashPoint);
+          setGameState("crashed");
+          setResult(res.data);
+          setPlaying(false);
+          refreshUser();
+
+          if (res.data.won === true) {
+            toast.success(`ВЫИГРЫШ! ${g.crashPoint}x = +${res.data.profit} монет!`, { duration: 5000 });
+          } else if (res.data.won === false) {
+            toast.error(`ПРОИГРЫШ! ${g.crashPoint}x`, { duration: 3000 });
+          } else {
+            toast.info(`НИЧЬЯ! ${g.crashPoint}x - ставка возвращена`, { duration: 3000 });
+          }
+        }
+      }, 16); // ~60 FPS
     } catch (error) {
       toast.error(error.response?.data?.detail || "Ошибка");
+      setPlaying(false);
+      setGameState("idle");
     }
   };
 
-  // Save coins
-  const saveCoins = async () => {
-    if (coinsEarned < 1) {
-      toast.error("Накопите минимум 1 монету");
-      return;
+  const drawGraph = (path, progress) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext("2d");
+    const width = canvas.width;
+    const height = canvas.height;
+    
+    // Clear canvas
+    ctx.fillStyle = "#050505";
+    ctx.fillRect(0, 0, width, height);
+    
+    // Grid lines
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 10; i++) {
+      const y = (height / 10) * i;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(width, y);
+      ctx.stroke();
+    }
+    for (let i = 0; i <= 10; i++) {
+      const x = (width / 10) * i;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, height);
+      ctx.stroke();
     }
     
-    setSaving(true);
-    try {
-      const res = await axios.post(`${API}/clicker/save`, { coins: Math.floor(coinsEarned) }, { headers: { Authorization: `Bearer ${token}` } });
-      toast.success(`+${res.data.coinsAdded} монет сохранено!`);
-      setCoinsEarned(coinsEarned - Math.floor(coinsEarned)); // Keep decimal part
-      setClicks(0);
-      refreshUser();
-    } catch (error) {
-      toast.error(error.response?.data?.detail || "Ошибка");
-    } finally {
-      setSaving(false);
+    if (path.length < 2) return;
+    
+    // Find min/max for scaling
+    const minY = Math.min(...path.map(p => p.y));
+    const maxY = Math.max(...path.map(p => p.y));
+    const yRange = maxY - minY || 1;
+    const yPadding = yRange * 0.15;
+    
+    // Convert to canvas coordinates
+    const points = path.map(point => {
+      const x = point.x * width;
+      const normalizedY = (point.y - minY + yPadding) / (yRange + 2 * yPadding);
+      const y = height - (normalizedY * height);
+      return { x, y, originalY: point.y };
+    });
+    
+    // Line color
+    const lineColor = progress >= 1 
+      ? (gameRef.current.crashPoint >= 1.0 ? "#10b981" : "#ef4444")
+      : "#fbbf24";
+    
+    // Draw gradient fill under the line (ONLY up to current position)
+    const gradient = ctx.createLinearGradient(0, 0, 0, height);
+    gradient.addColorStop(0, lineColor + "40");
+    gradient.addColorStop(1, lineColor + "00");
+    
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, height);
+    
+    // Smooth curve through points
+    for (let i = 0; i < points.length - 1; i++) {
+      const current = points[i];
+      const next = points[i + 1];
+      const midX = (current.x + next.x) / 2;
+      const midY = (current.y + next.y) / 2;
+      
+      if (i === 0) {
+        ctx.lineTo(current.x, current.y);
+      }
+      ctx.quadraticCurveTo(current.x, current.y, midX, midY);
     }
+    
+    const lastPoint = points[points.length - 1];
+    ctx.lineTo(lastPoint.x, lastPoint.y);
+    
+    // Close gradient path at CURRENT position (not at right edge)
+    ctx.lineTo(lastPoint.x, height);
+    ctx.lineTo(points[0].x, height);
+    ctx.closePath();
+    ctx.fill();
+    
+    // Draw main curve line
+    ctx.strokeStyle = lineColor;
+    ctx.lineWidth = 4;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.shadowColor = lineColor;
+    ctx.shadowBlur = 8;
+    
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    
+    for (let i = 0; i < points.length - 1; i++) {
+      const current = points[i];
+      const next = points[i + 1];
+      const midX = (current.x + next.x) / 2;
+      const midY = (current.y + next.y) / 2;
+      ctx.quadraticCurveTo(current.x, current.y, midX, midY);
+    }
+    
+    // End at last point
+    ctx.lineTo(lastPoint.x, lastPoint.y);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    
+    // Draw circle at current position
+    ctx.fillStyle = lineColor;
+    ctx.strokeStyle = lineColor;
+    ctx.lineWidth = 3;
+    
+    ctx.beginPath();
+    ctx.arc(lastPoint.x, lastPoint.y, 8, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Outer glow ring
+    ctx.shadowColor = lineColor;
+    ctx.shadowBlur = 20;
+    ctx.beginPath();
+    ctx.arc(lastPoint.x, lastPoint.y, 12, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
   };
 
-  // Star gradient based on intensity
-  const getStarStyle = () => {
-    const red = Math.min(255, 150 + intensity);
-    const green = Math.max(0, 100 - intensity);
-    const blue = Math.max(0, 100 - intensity);
-    return {
-      background: `linear-gradient(135deg, rgb(${red}, ${green}, ${blue}), rgb(${Math.min(255, red + 50)}, ${Math.max(0, green - 30)}, ${Math.max(0, blue - 30)}))`,
-      boxShadow: `0 0 ${10 + intensity / 2}px rgba(${red}, ${green / 2}, ${blue / 2}, ${0.3 + intensity / 200})`,
-    };
+  const resetGame = () => {
+    gameRef.current.running = false;
+    setGameState("idle");
+    setMultiplier(1.0);
+    setResult(null);
+    
+    // Clear canvas
+    const canvas = canvasRef.current;
+    if (canvas) {
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#050505";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
   };
 
   return (
     <div className="pb-24 md:pb-8">
-      <div className="text-center mb-6 md:mb-8">
+      <div className="text-center mb-8 md:mb-10 mt-6 md:mt-8">
         <h1 className="font-orbitron text-xl md:text-2xl font-bold tracking-wider flex items-center justify-center gap-3">
-          <span className="text-2xl md:text-3xl">⛧</span> КЛИКЕР
+          <TrendingUp size={28} /> CRASH ИГРА
         </h1>
-        <p className="text-gray-400 mt-2 text-sm md:text-base">Кликай и зарабатывай монеты!</p>
+        <p className="text-gray-400 mt-3 text-sm md:text-base">Ставь и угадывай множитель!</p>
       </div>
 
-      {/* Stats */}
-      <div className="grid grid-cols-3 gap-2 md:gap-4 mb-6 md:mb-8">
-        <div className="card text-center p-2 md:p-4">
-          <div className="text-gray-400 text-xs md:text-sm">Кликов</div>
-          <div className="font-orbitron text-lg md:text-2xl">{clicks}</div>
-        </div>
-        <div className="card text-center p-2 md:p-4">
-          <div className="text-gray-400 text-xs md:text-sm">Накоплено</div>
-          <div className="font-orbitron text-lg md:text-2xl text-yellow-400">{coinsEarned.toFixed(2)}</div>
-        </div>
-        <div className="card text-center p-2 md:p-4">
-          <div className="text-gray-400 text-xs md:text-sm">За клик</div>
-          <div className="font-orbitron text-lg md:text-2xl text-green-400">{maxCoinsPerClick.toFixed(2)}</div>
-        </div>
-      </div>
+      {/* Game Display */}
+      <div className="card p-4 md:p-8 mb-6 md:mb-8 text-center">
+        <div className="relative mx-auto max-w-2xl">
+          {/* Multiplier Display */}
+          <div className={`mb-6 ${gameState === "playing" ? "animate-pulse" : ""}`}>
+            <div className={`font-orbitron text-5xl md:text-7xl font-bold transition-all duration-300 ${
+              gameState === "crashed" 
+                ? (result?.won === true ? "text-green-400" : result?.won === false ? "text-red-400" : "text-yellow-400")
+                : "text-white"
+            }`}>
+              {multiplier.toFixed(2)}x
+            </div>
+          </div>
 
-      {/* Clicker Star */}
-      <div className="flex justify-center mb-6 md:mb-8">
-        <button
-          onClick={handleClick}
-          className={`relative w-32 h-32 sm:w-40 sm:h-40 md:w-48 md:h-48 rounded-full flex items-center justify-center transition-all duration-100 cursor-pointer select-none active:scale-95 ${isShaking ? 'animate-shake' : ''}`}
-          style={getStarStyle()}
-          data-testid="clicker-star"
-        >
-          <span 
-            className="text-5xl sm:text-6xl md:text-7xl text-white drop-shadow-lg select-none"
-            style={{
-              transform: isShaking ? `scale(${1 + intensity / 200})` : 'scale(1)',
-              transition: 'transform 0.1s'
-            }}
-          >⛧</span>
-          {intensity > 50 && (
-            <div className="absolute inset-0 rounded-full animate-pulse" style={{
-              background: `radial-gradient(circle, rgba(255,100,100,0.3) 0%, transparent 70%)`,
-            }} />
+          {/* Canvas for Graph */}
+          <div className="mb-6 flex justify-center">
+            <canvas 
+              ref={canvasRef} 
+              width={600} 
+              height={300}
+              className="border border-white/10 rounded-lg"
+              style={{ maxWidth: "100%", width: "600px", height: "300px" }}
+            />
+          </div>
+          
+          {gameState === "idle" && (
+            <div className="text-gray-500 mb-6">Сделайте ставку для начала</div>
           )}
-        </button>
+          
+          {gameState === "playing" && (
+            <div className="text-yellow-400 mb-6 animate-pulse">Стрелка движется...</div>
+          )}
+          
+          {gameState === "crashed" && result && (
+            <div className="mb-6 space-y-3">
+              <div className={`text-xl font-bold ${
+                result.won === true ? "text-green-400" : 
+                result.won === false ? "text-red-400" : 
+                "text-yellow-400"
+              }`}>
+                {result.won === true ? "ВЫИГРЫШ!" : result.won === false ? "ПРОИГРЫШ!" : "НИЧЬЯ!"}
+              </div>
+              <div className="text-white">
+                <div>Ставка: {result.betAmount} монет</div>
+                {result.won === true && <div className="text-green-400">Выигрыш: {result.winAmount} монет</div>}
+                {result.won === null && <div className="text-yellow-400">Возврат: {result.betAmount} монет</div>}
+                <div className={result.profit > 0 ? "text-green-400" : result.profit < 0 ? "text-red-400" : "text-yellow-400"}>
+                  {result.profit > 0 ? "+" : ""}{result.profit} монет
+                </div>
+              </div>
+              <button onClick={resetGame} className="btn-primary mt-4">
+                <RotateCcw size={18} /> ИГРАТЬ СНОВА
+              </button>
+            </div>
+          )}
+
+          {/* Bet Controls */}
+          {gameState === "idle" && (
+            <div className="space-y-6">
+              {/* Quick Bet Buttons */}
+              <div className="grid grid-cols-5 gap-2">
+                {quickBets.map((amount) => (
+                  <button
+                    key={amount}
+                    onClick={() => setBetAmount(amount)}
+                    className={`px-2 py-2 text-xs md:text-sm font-orbitron border transition-all ${
+                      betAmount === amount 
+                        ? "bg-white text-black border-white" 
+                        : "bg-white/10 border-white/20 hover:bg-white/20"
+                    }`}
+                    data-testid={`quick-bet-${amount}`}
+                  >
+                    {amount}
+                  </button>
+                ))}
+              </div>
+
+              {/* Custom Bet Input */}
+              <div>
+                <label className="label-text">Сумма ставки (10 - 50000)</label>
+                <input
+                  type="number"
+                  value={betAmount}
+                  onChange={(e) => setBetAmount(Math.min(50000, Math.max(10, parseInt(e.target.value) || 10)))}
+                  className="input-field text-center font-orbitron text-xl"
+                  min="10"
+                  max="50000"
+                  disabled={playing}
+                  data-testid="bet-input"
+                />
+              </div>
+
+              {/* Start Button */}
+              <button
+                onClick={startGame}
+                disabled={playing || betAmount < 10 || betAmount > 50000 || (user?.coins || 0) < betAmount}
+                className="btn-primary w-full py-4 text-lg"
+                data-testid="start-crash-game"
+              >
+                {playing ? "..." : `ИГРАТЬ (${betAmount} монет)`}
+              </button>
+
+              {/* User Balance */}
+              <div className="text-gray-400 text-sm">
+                Ваш баланс: <span className="text-yellow-400 font-bold">{user?.coins || 0}</span> монет
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Intensity bar */}
-      <div className="max-w-md mx-auto mb-6 md:mb-8 px-4">
-        <div className="flex justify-between text-xs md:text-sm text-gray-400 mb-1">
-          <span>Интенсивность</span>
-          <span>{Math.round(intensity)}%</span>
+      {/* Game Info */}
+      <div className="grid md:grid-cols-2 gap-4 max-w-2xl mx-auto">
+        <div className="card p-4">
+          <h3 className="font-orbitron text-sm font-bold text-white mb-3 flex items-center gap-2">
+            <Coins size={16} /> СТАВКИ
+          </h3>
+          <div className="text-gray-400 text-sm space-y-1">
+            <div>Минимум: 10 монет</div>
+            <div>Максимум: 50,000 монет</div>
+            <div>При 1.0x: возврат ставки</div>
+          </div>
         </div>
-        <div className="h-2 bg-white/10 rounded-full overflow-hidden">
-          <div 
-            className="h-full transition-all duration-100"
-            style={{ 
-              width: `${intensity}%`,
-              background: `linear-gradient(90deg, #fbbf24, #ef4444)`
-            }}
-          />
+        <div className="card p-4">
+          <h3 className="font-orbitron text-sm font-bold text-white mb-3 flex items-center gap-2">
+            <TrendingUp size={16} /> МНОЖИТЕЛИ
+          </h3>
+          <div className="text-gray-400 text-sm space-y-1">
+            <div>Минимум: 0.2x</div>
+            <div>Максимум: 30x</div>
+            <div>Случайное распределение</div>
+          </div>
         </div>
-      </div>
-
-      {/* Save button */}
-      <div className="flex justify-center mb-8">
-        <button
-          onClick={saveCoins}
-          disabled={saving || coinsEarned < 1}
-          className="btn-primary px-8 py-3 flex items-center gap-2"
-          data-testid="clicker-save"
-        >
-          <Coins size={18} />
-          {saving ? "..." : `СОХРАНИТЬ ${Math.floor(coinsEarned)}`}
-        </button>
       </div>
     </div>
   );
@@ -1286,7 +1672,7 @@ const ClickerGameInner = () => {
 
 // ==================== GAMES HUB ====================
 const GamesHub = () => {
-  const [activeGame, setActiveGame] = useState(null); // null, 'dodge', 'clicker'
+  const [activeGame, setActiveGame] = useState(null); // null, 'dodge', 'crash'
 
   return (
     <div className="main-content">
@@ -1320,20 +1706,20 @@ const GamesHub = () => {
                 </div>
               </div>
 
-              {/* Clicker Game Card */}
+              {/* Crash Game Card */}
               <div 
                 className="card cursor-pointer hover:border-white/40 transition-all active:scale-95 md:hover:scale-105 p-4 md:p-8"
-                onClick={() => setActiveGame('clicker')}
-                data-testid="select-clicker"
+                onClick={() => setActiveGame('crash')}
+                data-testid="select-crash"
               >
-                <div className="w-16 h-16 md:w-20 md:h-20 mx-auto flex items-center justify-center bg-purple-500/20 border border-purple-500/30 rounded-lg mb-4 md:mb-6">
-                  <span className="text-3xl md:text-4xl text-purple-400">⛧</span>
+                <div className="w-16 h-16 md:w-20 md:h-20 mx-auto flex items-center justify-center bg-green-500/20 border border-green-500/30 rounded-lg mb-4 md:mb-6">
+                  <TrendingUp size={32} className="text-green-400" />
                 </div>
-                <h2 className="font-orbitron text-lg md:text-xl text-center mb-2 md:mb-3">КЛИКЕР</h2>
-                <p className="text-gray-400 text-center text-sm md:text-base mb-3 md:mb-4">Кликай и копи монеты!</p>
+                <h2 className="font-orbitron text-lg md:text-xl text-center mb-2 md:mb-3">CRASH</h2>
+                <p className="text-gray-400 text-center text-sm md:text-base mb-3 md:mb-4">Угадай множитель!</p>
                 <div className="text-center">
-                  <span className="inline-block px-3 py-1.5 md:px-4 md:py-2 bg-purple-500/20 border border-purple-500/30 text-purple-400 text-xs md:text-sm">
-                    До 0.5 монет за клик
+                  <span className="inline-block px-3 py-1.5 md:px-4 md:py-2 bg-green-500/20 border border-green-500/30 text-green-400 text-xs md:text-sm">
+                    До 30x множитель
                   </span>
                 </div>
               </div>
@@ -1353,7 +1739,7 @@ const GamesHub = () => {
           </div>
         )}
 
-        {activeGame === 'clicker' && (
+        {activeGame === 'crash' && (
           <div className="pt-8 md:pt-4">
             <button 
               onClick={() => setActiveGame(null)} 
@@ -1361,7 +1747,7 @@ const GamesHub = () => {
             >
               <ChevronRight size={16} className="rotate-180" /> Назад к играм
             </button>
-            <ClickerGameInner />
+            <CrashGameInner />
           </div>
         )}
       </div>
@@ -1399,8 +1785,20 @@ const Shop = () => {
   const purchase = async (itemType, needsName, label) => {
     let itemName = null;
     if (needsName) {
-      itemName = prompt(`Введите название для "${label}":`);
+      // Get max length based on item type
+      let maxLength = 20;
+      if (itemType === "create_clan" || itemType === "clan_category") {
+        maxLength = 10;
+      }
+      
+      itemName = prompt(`Введите название для "${label}" (макс ${maxLength} символов):`);
       if (!itemName) return;
+      
+      // Validate length on frontend
+      if (itemName.length > maxLength) {
+        toast.error(`Название не более ${maxLength} символов`);
+        return;
+      }
     }
     setPurchasing(true);
     try {
@@ -1840,6 +2238,28 @@ const AdminPanel = () => {
     } finally { setLoading(false); }
   };
 
+  const handleRemoveCoins = async (e) => {
+    e.preventDefault();
+    if (!targetUsername.trim()) { toast.error("Введите имя"); return; }
+    const amount = parseInt(coinsAmount);
+    if (!amount || amount <= 0) { toast.error("Введите сумму"); return; }
+    if (amount > 10000) { toast.error("Максимум 10,000 монет за раз"); return; }
+
+    if (!window.confirm(`Снять ${amount} монет у ${targetUsername.trim()}?`)) return;
+
+    setLoading(true);
+    try {
+      const res = await axios.post(`${API}/admin/remove-coins`, { targetUsername: targetUsername.trim(), amount }, { headers: { Authorization: `Bearer ${token}` } });
+      toast.success(`-${res.data.removedCoins} монет у ${res.data.fromUser}`);
+      setTargetUsername("");
+      setCoinsAmount("");
+      loadUsers();
+      if (targetUsername.trim().toLowerCase() === user?.username.toLowerCase()) await refreshUser();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Ошибка");
+    } finally { setLoading(false); }
+  };
+
   const handleGiveChest = async (e) => {
     e.preventDefault();
     if (!chestTarget.trim()) { toast.error("Введите имя"); return; }
@@ -1935,10 +2355,10 @@ const AdminPanel = () => {
         </div>
 
         <div className="grid md:grid-cols-2 gap-6 mb-8">
-          {/* Add Coins */}
+          {/* Add/Remove Coins */}
           <div className="card">
             <h2 className="font-orbitron text-lg mb-6 flex items-center gap-2">
-              <Plus size={18} /> ДОБАВИТЬ МОНЕТЫ
+              <Coins size={18} /> УПРАВЛЕНИЕ МОНЕТАМИ
             </h2>
             <form onSubmit={handleAddCoins} className="space-y-4">
               <div>
@@ -1952,9 +2372,14 @@ const AdminPanel = () => {
                   <input type="number" value={coinsAmount} onChange={(e) => setCoinsAmount(e.target.value)} className="input-field" placeholder="0" min="1" data-testid="admin-coins-amount" />
                 </div>
               </div>
-              <button type="submit" disabled={loading} className="btn-primary w-full flex items-center justify-center gap-2" data-testid="admin-add-coins-btn">
-                <Plus size={16} /> {loading ? "..." : "ДОБАВИТЬ"}
-              </button>
+              <div className="grid grid-cols-2 gap-3">
+                <button type="submit" disabled={loading} className="btn-primary flex items-center justify-center gap-2" data-testid="admin-add-coins-btn">
+                  <Plus size={16} /> {loading ? "..." : "ДОБАВИТЬ"}
+                </button>
+                <button type="button" onClick={handleRemoveCoins} disabled={loading} className="btn-secondary flex items-center justify-center gap-2 border-red-500/30 text-red-400 hover:bg-red-500/10" data-testid="admin-remove-coins-btn">
+                  <Send size={16} className="rotate-180" /> {loading ? "..." : "СНЯТЬ"}
+                </button>
+              </div>
             </form>
             <div className="mt-4 pt-4 border-t border-white/10">
               <p className="text-gray-500 text-sm mb-3">Быстро себе:</p>
