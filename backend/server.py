@@ -60,6 +60,10 @@ class AdminAddCoins(BaseModel):
 class AdminDeleteUser(BaseModel):
     targetUsername: str
 
+class AdminSetLevel(BaseModel):
+    targetUsername: str
+    level: int
+
 class BonusRequest(BaseModel):
     bonusType: str
 
@@ -272,10 +276,10 @@ async def submit_game_result(data: GameResult, user: dict = Depends(get_current_
 
 # ==================== SHOP ROUTES ====================
 SHOP_ITEMS = {
-    "custom_role": {"price": 3000, "name": "Кастомная роль"},
-    "custom_gradient": {"price": 4000, "name": "Градиент для роли"},
-    "create_clan": {"price": 5000, "name": "Создание клана"},
-    "clan_category": {"price": 6000, "name": "Категория клана"}
+    "custom_role": {"price": 60000, "name": "Кастомная роль"},
+    "custom_gradient": {"price": 80000, "name": "Градиент для роли"},
+    "create_clan": {"price": 150000, "name": "Создание клана"},
+    "clan_category": {"price": 210000, "name": "Категория клана"}
 }
 
 @api_router.get("/shop/items")
@@ -346,6 +350,17 @@ async def transfer_coins(data: TransferRequest, user: dict = Depends(get_current
         raise HTTPException(status_code=400, detail="Недостаточно монет")
     if data.toUsername.lower() == user["username"].lower():
         raise HTTPException(status_code=400, detail="Нельзя отправить монеты себе")
+    
+    # Level requirement: Must be level 30+ to transfer (except admins and creator)
+    is_creator = user["username"].lower() == "pseudotamine"
+    is_admin = user.get("isAdmin", False)
+    user_level = user.get("level", 1)
+    
+    if not is_creator and not is_admin and user_level < 30:
+        raise HTTPException(
+            status_code=403, 
+            detail=f"Переводы доступны с 30 уровня. Ваш уровень: {user_level}"
+        )
     
     recipient = await db.users.find_one({"username": {"$regex": f"^{data.toUsername}$", "$options": "i"}}, {"_id": 0})
     if not recipient:
@@ -494,6 +509,48 @@ async def admin_delete_user(data: AdminDeleteUser, user: dict = Depends(get_curr
         "success": True,
         "deletedUser": target["username"],
         "message": f"Пользователь {target['username']} полностью удалён"
+    }
+
+@api_router.post("/admin/set-level")
+async def admin_set_level(data: AdminSetLevel, user: dict = Depends(get_current_user)):
+    if not user.get("isAdmin"):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    
+    if data.level < 1 or data.level > 100:
+        raise HTTPException(status_code=400, detail="Уровень должен быть от 1 до 100")
+    
+    # Find target user
+    target = await db.users.find_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    
+    # Calculate XP for the target level
+    # Formula: each level requires 15% more XP than previous
+    total_xp = 0
+    xp_for_next = 100
+    for lvl in range(1, data.level):
+        total_xp += xp_for_next
+        xp_for_next = int(xp_for_next * 1.15)
+    
+    # Calculate XP required for NEXT level (level + 1)
+    xp_required_for_next = xp_for_next
+    
+    # Update user: set level, reset current XP to 0
+    await db.users.update_one(
+        {"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}},
+        {"$set": {
+            "level": data.level,
+            "xp": total_xp  # Total XP accumulated up to this level
+        }}
+    )
+    
+    return {
+        "success": True,
+        "targetUser": target["username"],
+        "newLevel": data.level,
+        "totalXP": total_xp,
+        "xpForNextLevel": xp_required_for_next,
+        "message": f"Уровень {data.level} выдан пользователю {target['username']}"
     }
 
 @api_router.get("/admin/users")
