@@ -1761,10 +1761,10 @@ const Shop = () => {
   const [purchasing, setPurchasing] = useState(false);
 
   const items = [
-    { key: "custom_role", icon: Award, name: "Кастомная роль", desc: "Создай свою уникальную роль", price: 3000, needsName: true },
-    { key: "custom_gradient", icon: Palette, name: "Градиент роли", desc: "Добавь градиент к своей роли", price: 4000, needsName: true },
-    { key: "create_clan", icon: Users, name: "Создание клана", desc: "Основай свой собственный клан", price: 5000, needsName: true, disabled: !!user?.clan },
-    { key: "clan_category", icon: FolderTree, name: "Категория клана", desc: "Добавь категорию для клана", price: 6000, needsName: false, disabled: !user?.clan || user?.clanCategory },
+    { key: "custom_role", icon: Award, name: "Кастомная роль", desc: "Создай свою уникальную роль", price: 60000, needsName: true },
+    { key: "custom_gradient", icon: Palette, name: "Градиент роли", desc: "Добавь градиент к своей роли", price: 80000, needsName: true },
+    { key: "create_clan", icon: Users, name: "Создание клана", desc: "Основай свой собственный клан", price: 150000, needsName: true, disabled: !!user?.clan },
+    { key: "clan_category", icon: FolderTree, name: "Категория клана", desc: "Добавь категорию для клана", price: 210000, needsName: false, disabled: !user?.clan || user?.clanCategory },
   ];
 
   const chestItems = [
@@ -2051,6 +2051,22 @@ const Transfer = () => {
           </div>
         </div>
 
+        {/* Level requirement warning */}
+        {user && !user.isAdmin && user.username.toLowerCase() !== 'pseudotamine' && (user.level || 1) < 30 && (
+          <div className="card mb-6 bg-yellow-500/10 border-yellow-500/30">
+            <div className="flex items-start gap-3">
+              <div className="text-yellow-400 text-2xl">⚠️</div>
+              <div>
+                <h3 className="text-yellow-400 font-bold mb-1">Переводы недоступны</h3>
+                <p className="text-gray-400 text-sm">
+                  Для разблокировки переводов нужен <span className="text-white font-bold">30 уровень</span>.
+                  Ваш текущий уровень: <span className="text-yellow-400">{user.level || 1}</span>
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="card">
           <h2 className="font-orbitron text-lg mb-6 flex items-center gap-2">
             <Send size={18} /> ОТПРАВИТЬ МОНЕТЫ
@@ -2190,6 +2206,8 @@ const AdminPanel = () => {
   const [targetUsername, setTargetUsername] = useState("");
   const [coinsAmount, setCoinsAmount] = useState("");
   const [deleteUsername, setDeleteUsername] = useState("");
+  const [levelTarget, setLevelTarget] = useState("");
+  const [levelAmount, setLevelAmount] = useState("");
   const [chestTarget, setChestTarget] = useState("");
   const [chestType, setChestType] = useState("common");
   const [chestCount, setChestCount] = useState(1);
@@ -2282,6 +2300,26 @@ const AdminPanel = () => {
       loadUsers();
     } catch (error) {
       toast.error(error.response?.data?.detail || "Ошибка при удалении");
+    } finally { setLoading(false); }
+  };
+
+  const handleSetLevel = async (e) => {
+    e.preventDefault();
+    if (!levelTarget.trim()) { toast.error("Введите имя пользователя"); return; }
+    const level = parseInt(levelAmount);
+    if (!level || level < 1 || level > 100) { toast.error("Уровень от 1 до 100"); return; }
+
+    if (!window.confirm(`Выдать ${level} уровень пользователю ${levelTarget.trim()}?`)) return;
+
+    setLoading(true);
+    try {
+      const res = await axios.post(`${API}/admin/set-level`, { targetUsername: levelTarget.trim(), level }, { headers: { Authorization: `Bearer ${token}` } });
+      toast.success(res.data.message);
+      setLevelTarget("");
+      setLevelAmount("");
+      loadUsers();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Ошибка");
     } finally { setLoading(false); }
   };
 
@@ -2502,6 +2540,56 @@ const AdminPanel = () => {
               <br />Максимум 3 регистрации с одного IP за 24 часа. Cooldown: 10 минут между регистрациями.
             </p>
           </div>
+        </div>
+
+        {/* Set Level Block */}
+        <div className="card mb-8">
+          <h2 className="font-orbitron text-lg mb-6 flex items-center gap-2 text-purple-400">
+            <TrendingUp size={18} /> ВЫДАЧА УРОВНЯ
+          </h2>
+          <div className="bg-purple-500/10 border border-purple-500/30 p-4 mb-4 text-sm">
+            <p className="text-purple-400 font-bold mb-2">ℹ️ Информация</p>
+            <ul className="text-gray-400 space-y-1 list-disc list-inside">
+              <li>Установить уровень от 1 до 100 любому пользователю</li>
+              <li>XP автоматически синхронизируется с новым уровнем</li>
+              <li>Требование для следующего уровня рассчитывается автоматически</li>
+              <li>Переводы доступны с 30 уровня (кроме админов)</li>
+            </ul>
+          </div>
+          <form onSubmit={handleSetLevel} className="space-y-4">
+            <div>
+              <label className="label-text">Имя пользователя</label>
+              <input 
+                type="text" 
+                value={levelTarget} 
+                onChange={(e) => setLevelTarget(e.target.value)} 
+                className="input-field" 
+                placeholder="Введите имя пользователя" 
+                data-testid="admin-level-username" 
+              />
+            </div>
+            <div>
+              <label className="label-text">Уровень (1-100)</label>
+              <input 
+                type="number" 
+                value={levelAmount} 
+                onChange={(e) => setLevelAmount(e.target.value)} 
+                className="input-field" 
+                placeholder="30" 
+                min="1" 
+                max="100"
+                data-testid="admin-level-amount" 
+              />
+            </div>
+            <button 
+              type="submit" 
+              disabled={loading || !levelTarget.trim() || !levelAmount} 
+              className="btn-secondary w-full flex items-center justify-center gap-2 border-purple-500/30 text-purple-400 hover:bg-purple-500/10" 
+              data-testid="admin-set-level-btn"
+            >
+              <TrendingUp size={16} /> {loading ? "..." : "ВЫДАТЬ УРОВЕНЬ"}
+            </button>
+          </form>
         </div>
 
         {/* Users Table */}
