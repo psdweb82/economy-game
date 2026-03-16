@@ -70,12 +70,6 @@ class BonusRequest(BaseModel):
 class ChestRequest(BaseModel):
     chestId: str
 
-class ClickerSaveRequest(BaseModel):
-    coins: int
-
-class ClickerUpgradeRequest(BaseModel):
-    upgradeType: str
-
 # ==================== HELPERS ====================
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -105,6 +99,12 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0})
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
+    
+    # ENHANCED SECURITY: Auto-delete account if balance is negative
+    if user.get("coins", 0) < 0 or user.get("xp", 0) < 0:
+        await db.users.delete_one({"id": user["id"]})
+        raise HTTPException(status_code=403, detail="Аккаунт был удалён из-за обнаружения манипуляций с балансом")
+    
     return user
 
 def calculate_level(xp: int) -> int:
@@ -117,38 +117,75 @@ def calculate_level(xp: int) -> int:
         xp_for_next = int(xp_for_next * 1.15)
     return level
 
+async def check_suspicious_activity(user_id: str, old_coins: int, new_coins: int, old_xp: int, new_xp: int, old_level: int, new_level: int, from_admin: bool = False):
+    """
+    Auto-ban for suspicious gains:
+    - Coins gain >5000 at once (unless from admin)
+    - XP gain >1000 at once (unless from admin)
+    - Level jump >5 at once (unless from admin)
+    - Negative balance (always ban)
+    """
+    coins_gain = new_coins - old_coins
+    xp_gain = new_xp - old_xp
+    level_jump = new_level - old_level
+    
+    suspicious = False
+    reason = ""
+    
+    # Check for excessive gains (skip if from admin)
+    if not from_admin:
+        if coins_gain > 5000:
+            suspicious = True
+            reason = f"Подозрительное начисление монет: +{coins_gain}"
+        elif xp_gain > 1000:
+            suspicious = True
+            reason = f"Подозрительное начисление XP: +{xp_gain}"
+        elif level_jump > 5:
+            suspicious = True
+            reason = f"Подозрительный прыжок уровня: +{level_jump}"
+    
+    # Always check negative balance
+    if new_coins < 0 or new_xp < 0:
+        suspicious = True
+        reason = f"Отрицательный баланс (coins: {new_coins}, xp: {new_xp})"
+    
+    if suspicious:
+        # BAN user (do NOT delete)
+        await db.users.update_one(
+            {"id": user_id},
+            {"$set": {"isBanned": True}}
+        )
+        logger.warning(f"User {user_id} auto-banned: {reason}")
+        raise HTTPException(
+            status_code=403, 
+            detail=f"Ваш аккаунт заблокирован"
+        )
+
+
 # ==================== AUTH ROUTES ====================
 @api_router.post("/auth/register")
 async def register(data: UserRegister, request: Request):
-    # Multi-account protection: Check IP address
-    client_ip = request.client.host if request.client else "unknown"
+    # ANTI-DUPE: Get real client IP from X-Forwarded-For header (Kubernetes/nginx proxy)
+    forwarded_for = request.headers.get("x-forwarded-for")
+    client_ip = forwarded_for.split(",")[0].strip() if forwarded_for else request.client.host
     
-    # Check how many accounts created from this IP in last 24 hours
-    twenty_four_hours_ago = datetime.now(timezone.utc) - timedelta(hours=24)
-    recent_accounts = await db.users.count_documents({
-        "registrationIP": client_ip,
-        "createdAt": {"$gte": twenty_four_hours_ago.isoformat()}
-    })
-    
-    # Limit: Max 3 accounts per IP per 24 hours
-    if recent_accounts >= 3:
-        raise HTTPException(
-            status_code=429, 
-            detail="Превышен лимит регистраций. Попробуйте позже."
-        )
-    
-    # Check last registration time from this IP (cooldown: 10 minutes)
-    ten_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=10)
+    # Check cooldown: 1 hour between registrations from same IP
+    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
     recent_registration = await db.users.find_one({
         "registrationIP": client_ip,
-        "createdAt": {"$gte": ten_minutes_ago.isoformat()}
+        "createdAt": {"$gte": one_hour_ago.isoformat()}
     })
     
     if recent_registration:
         raise HTTPException(
-            status_code=429,
-            detail="Подождите 10 минут перед следующей регистрацией"
+            status_code=429, 
+            detail="Подождите 1 час перед следующей регистрацией"
         )
+    
+    # Check total accounts from this IP (strict limit: max 2 accounts ever)
+    accounts_from_ip = await db.users.count_documents({"registrationIP": client_ip})
+    if accounts_from_ip >= 2:
+        raise HTTPException(status_code=400, detail="Достигнут лимит аккаунтов с этого IP-адреса (максимум 2)")
     
     existing = await db.users.find_one({"username": {"$regex": f"^{data.username}$", "$options": "i"}})
     if existing:
@@ -164,9 +201,7 @@ async def register(data: UserRegister, request: Request):
         "id": user_id,
         "username": data.username,
         "passwordHash": hash_password(data.password),
-        "coins": 0,
-        "level": 1,
-        "xp": 0,
+        # NO coins, xp, level until approved
         "roles": [],
         "roleGradients": [],
         "clan": None,
@@ -174,6 +209,8 @@ async def register(data: UserRegister, request: Request):
         "purchaseHistory": [],
         "isAdmin": False,
         "isBanned": False,
+        "approved": False,  # Requires admin approval
+        "loginAttempted": False,  # Track login attempts
         "lastGameTime": None,
         "lastDailyBonus": None,
         "lastWeeklyBonus": None,
@@ -183,10 +220,9 @@ async def register(data: UserRegister, request: Request):
     }
     
     await db.users.insert_one(user)
-    token = create_token(user_id, data.username, False)
     
-    user_response = {k: v for k, v in user.items() if k not in ["passwordHash", "_id", "registrationIP"]}
-    return {"token": token, "user": user_response}
+    # DO NOT return token - user must login manually
+    return {"success": True, "message": "Аккаунт создан! Теперь войдите в систему", "username": data.username}
 
 @api_router.post("/auth/login")
 async def login(data: UserLogin):
@@ -201,6 +237,20 @@ async def login(data: UserLogin):
     if user.get("isBanned"):
         raise HTTPException(status_code=403, detail="Ваш аккаунт заблокирован")
     
+    # ENHANCED SECURITY: Check for negative balance before login
+    if user.get("coins", 0) < 0 or user.get("xp", 0) < 0:
+        await db.users.delete_one({"id": user["id"]})
+        raise HTTPException(status_code=403, detail="Аккаунт был удалён из-за обнаружения манипуляций с балансом")
+    
+    # Check if user is approved (skip for admins)
+    if not user.get("isAdmin", False) and not user.get("approved", False):
+        # Mark that user attempted to login - show in admin panel
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {"loginAttempted": True}}
+        )
+        raise HTTPException(status_code=403, detail="Ваш аккаунт ожидает одобрения администратора")
+    
     token = create_token(user["id"], user["username"], user.get("isAdmin", False))
     user_response = {k: v for k, v in user.items() if k != "passwordHash"}
     return {"token": token, "user": user_response}
@@ -212,6 +262,10 @@ async def get_me(user: dict = Depends(get_current_user)):
 # ==================== GAME ROUTES ====================
 @api_router.post("/game/submit")
 async def submit_game_result(data: GameResult, user: dict = Depends(get_current_user)):
+    # Check if user is approved
+    if not user.get("approved", False):
+        raise HTTPException(status_code=403, detail="Ваш аккаунт ожидает одобрения администратора")
+    
     max_possible_score = data.timePlayedSeconds * 5
     if data.score > max_possible_score or data.score < 0:
         raise HTTPException(status_code=400, detail="Недопустимый результат игры")
@@ -224,33 +278,57 @@ async def submit_game_result(data: GameResult, user: dict = Depends(get_current_
         if (now - last_time).total_seconds() < 10:
             raise HTTPException(status_code=429, detail="Подождите перед следующей игрой")
     
-    # NEW REWARD SYSTEM - Progressive rewards based on score
-    # Always give something, even for small scores!
-    if data.score < 10:
-        # Very small scores: 1-5 coins
-        coins_earned = max(1, data.score // 2)
-    elif data.score < 50:
-        # Small scores (10-49): 5-20 coins
-        coins_earned = 5 + (data.score - 10) // 2
-    elif data.score < 100:
-        # Good scores (50-99): 20-40 coins
-        coins_earned = 20 + (data.score - 50) // 2
-    elif data.score < 150:
-        # Great scores (100-149): 40-90 coins
-        coins_earned = 40 + (data.score - 100)
-    elif data.score < 200:
-        # Excellent scores (150-199): 90-120 coins
-        coins_earned = 90 + (data.score - 150) // 2
+    # UPDATED DODGE ARENA REWARDS: More generous reward system
+    score = data.score
+    if score >= 100:
+        # Score 100+: 70-90 coins
+        coins_earned = min(70 + (score - 100) // 5, 90)
+    elif score >= 50:
+        # Score 50-99: 25-40 coins
+        coins_earned = min(25 + (score - 50) // 3, 40)
+    elif score >= 20:
+        # Score 20-49: 10-24 coins
+        coins_earned = 10 + (score - 20) // 3
     else:
-        # Amazing scores (200+): 120-170+ coins
-        coins_earned = 120 + (data.score - 200) // 2
+        # Score 0-19: Minimum 3-9 coins
+        coins_earned = max(3, score // 3)
     
-    # XP scales with score
-    xp_earned = data.score // 3 + data.timePlayedSeconds
+    # XP earned with more generous formula
+    xp_earned = data.score // 3 + data.timePlayedSeconds * 2
+    
+    # Check if win needs admin approval (>200 coins OR >200 XP)
+    if coins_earned > 200 or xp_earned > 200:
+        # Create pending win for admin approval
+        pending_win = {
+            "id": str(uuid.uuid4()),
+            "userId": user["id"],
+            "username": user["username"],
+            "gameType": "dodge",
+            "score": data.score,
+            "timePlayedSeconds": data.timePlayedSeconds,
+            "coinsEarned": coins_earned,
+            "xpEarned": xp_earned,
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "status": "pending"
+        }
+        await db.pending_wins.insert_one(pending_win)
+        
+        return {
+            "pending": True,
+            "message": "Ваш выигрыш ожидает одобрения администрации",
+            "coinsEarned": coins_earned,
+            "xpEarned": xp_earned
+        }
     
     new_xp = user.get("xp", 0) + xp_earned
     new_level = calculate_level(new_xp)
     new_coins = user.get("coins", 0) + coins_earned
+    
+    # ANTI-CHEAT: Check for suspicious gains (from_admin=False for game wins)
+    old_coins = user.get("coins", 0)
+    old_xp = user.get("xp", 0)
+    old_level = user.get("level", 1)
+    await check_suspicious_activity(user["id"], old_coins, new_coins, old_xp, new_xp, old_level, new_level, from_admin=False)
     
     # Random chest drop (10% chance if score > 30)
     chest_dropped = None
@@ -475,16 +553,27 @@ async def admin_add_coins(data: AdminAddCoins, user: dict = Depends(get_current_
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     if data.amount <= 0:
         raise HTTPException(status_code=400, detail="Сумма должна быть положительной")
-    if data.amount > 10000:
-        raise HTTPException(status_code=400, detail="Максимум 10,000 монет за раз")
     
     target = await db.users.find_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"_id": 0})
     if not target:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     
+    # ANTI-CHEAT: Check for suspicious gains before updating (admin can bypass limits)
+    old_coins = target.get("coins", 0)
+    old_xp = target.get("xp", 0)
+    old_level = target.get("level", 1)
+    new_coins = old_coins + data.amount
+    
+    # Admin can give up to 10,000 without triggering ban
+    if data.amount <= 10000:
+        await check_suspicious_activity(target["id"], old_coins, new_coins, old_xp, old_xp, old_level, old_level, from_admin=True)
+    else:
+        # If admin gives >10,000, still check
+        await check_suspicious_activity(target["id"], old_coins, new_coins, old_xp, old_xp, old_level, old_level, from_admin=False)
+    
     await db.users.update_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"$inc": {"coins": data.amount}})
     
-    return {"success": True, "addedCoins": data.amount, "toUser": target["username"], "newBalance": target["coins"] + data.amount}
+    return {"success": True, "addedCoins": data.amount, "toUser": target["username"], "newBalance": new_coins}
 
 @api_router.post("/admin/remove-coins")
 async def admin_remove_coins(data: AdminAddCoins, user: dict = Depends(get_current_user)):
@@ -555,6 +644,13 @@ async def admin_set_level(data: AdminSetLevel, user: dict = Depends(get_current_
         total_xp += xp_for_next
         xp_for_next = int(xp_for_next * 1.15)
     
+    # ANTI-CHEAT: Check for suspicious level jump (admin can bypass)
+    old_coins = target.get("coins", 0)
+    old_xp = target.get("xp", 0)
+    old_level = target.get("level", 1)
+    new_level = data.level
+    await check_suspicious_activity(target["id"], old_coins, old_coins, old_xp, total_xp, old_level, new_level, from_admin=True)
+    
     # Calculate XP required for NEXT level (level + 1)
     xp_required_for_next = xp_for_next
     
@@ -581,7 +677,8 @@ async def admin_get_users(user: dict = Depends(get_current_user)):
     if not user.get("isAdmin"):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
-    users = await db.users.find({}, {"_id": 0, "passwordHash": 0}).to_list(1000)
+    # Show only approved users (онлайн пользователи)
+    users = await db.users.find({"approved": True}, {"_id": 0, "passwordHash": 0}).to_list(1000)
     return users
 
 class GiveChestRequest(BaseModel):
@@ -724,6 +821,86 @@ async def admin_remove_admin(data: SetAdminRequest, user: dict = Depends(get_cur
     
     if not target.get("isAdmin"):
         raise HTTPException(status_code=400, detail="Пользователь не является администратором")
+
+# ==================== PENDING WINS APPROVAL ====================
+class ApproveWinRequest(BaseModel):
+    winId: str
+
+@api_router.get("/admin/pending-wins")
+async def admin_get_pending_wins(user: dict = Depends(get_current_user)):
+    if not user.get("isAdmin"):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    
+    # Get all pending wins
+    pending = await db.pending_wins.find(
+        {"status": "pending"},
+        {"_id": 0}
+    ).to_list(1000)
+    return pending
+
+@api_router.post("/admin/approve-win")
+async def admin_approve_win(data: ApproveWinRequest, user: dict = Depends(get_current_user)):
+    if not user.get("isAdmin"):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    
+    # Find pending win
+    win = await db.pending_wins.find_one({"id": data.winId, "status": "pending"}, {"_id": 0})
+    if not win:
+        raise HTTPException(status_code=404, detail="Выигрыш не найден")
+    
+    # Get user
+    target = await db.users.find_one({"id": win["userId"]}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    
+    # Award coins and XP
+    new_coins = target.get("coins", 0) + win["coinsEarned"]
+    new_xp = target.get("xp", 0) + win["xpEarned"]
+    new_level = calculate_level(new_xp)
+    
+    await db.users.update_one(
+        {"id": win["userId"]},
+        {"$set": {
+            "coins": new_coins,
+            "xp": new_xp,
+            "level": new_level
+        }}
+    )
+    
+    # Mark win as approved
+    await db.pending_wins.update_one(
+        {"id": data.winId},
+        {"$set": {"status": "approved", "approvedAt": datetime.now(timezone.utc).isoformat()}}
+    )
+    
+    return {
+        "success": True,
+        "message": f"Выигрыш одобрен для {target['username']}",
+        "coinsAwarded": win["coinsEarned"],
+        "xpAwarded": win["xpEarned"]
+    }
+
+@api_router.post("/admin/reject-win")
+async def admin_reject_win(data: ApproveWinRequest, user: dict = Depends(get_current_user)):
+    if not user.get("isAdmin"):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    
+    # Find pending win
+    win = await db.pending_wins.find_one({"id": data.winId, "status": "pending"}, {"_id": 0})
+    if not win:
+        raise HTTPException(status_code=404, detail="Выигрыш не найден")
+    
+    # Mark win as rejected
+    await db.pending_wins.update_one(
+        {"id": data.winId},
+        {"$set": {"status": "rejected", "rejectedAt": datetime.now(timezone.utc).isoformat()}}
+    )
+    
+    return {
+        "success": True,
+        "message": f"Выигрыш отклонён"
+    }
+
     
     await db.users.update_one(
         {"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}},
@@ -740,6 +917,61 @@ async def admin_is_creator(user: dict = Depends(get_current_user)):
     is_creator = user["username"].lower() == CREATOR_USERNAME.lower()
     return {"isCreator": is_creator}
 
+# ==================== PENDING USERS MODERATION ====================
+@api_router.get("/admin/pending-users")
+async def admin_get_pending_users(user: dict = Depends(get_current_user)):
+    if not user.get("isAdmin"):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    
+    # Get users who attempted login but not approved yet
+    pending = await db.users.find(
+        {"approved": False, "isAdmin": False, "loginAttempted": True},
+        {"_id": 0, "passwordHash": 0}
+    ).to_list(1000)
+    return pending
+
+class ApproveUserRequest(BaseModel):
+    targetUsername: str
+
+@api_router.post("/admin/approve-user")
+async def admin_approve_user(data: ApproveUserRequest, user: dict = Depends(get_current_user)):
+    if not user.get("isAdmin"):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    
+    target = await db.users.find_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    
+    if target.get("approved"):
+        raise HTTPException(status_code=400, detail="Пользователь уже одобрен")
+    
+    # Approve user and initialize game fields
+    await db.users.update_one(
+        {"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}},
+        {"$set": {
+            "approved": True,
+            "coins": 0,
+            "xp": 0,
+            "level": 1
+        }}
+    )
+    
+    return {"success": True, "message": f"Пользователь {target['username']} одобрен"}
+
+@api_router.delete("/admin/delete-pending")
+async def admin_delete_pending(data: ApproveUserRequest, user: dict = Depends(get_current_user)):
+    if not user.get("isAdmin"):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    
+    target = await db.users.find_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    
+    # Delete user completely
+    await db.users.delete_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}})
+    
+    return {"success": True, "message": f"Пользователь {target['username']} удалён"}
+
 # ==================== HEALTH CHECK ====================
 @api_router.get("/health")
 async def health():
@@ -748,9 +980,9 @@ async def health():
 # ==================== LEADERBOARD ====================
 @api_router.get("/leaderboard")
 async def get_leaderboard(user: dict = Depends(get_current_user)):
-    # Get top 50 non-admin users sorted by coins
+    # Get top 50 approved non-admin NON-BANNED users sorted by coins
     cursor = db.users.find(
-        {"isAdmin": {"$ne": True}},
+        {"isAdmin": {"$ne": True}, "approved": True, "isBanned": {"$ne": True}},
         {"_id": 0, "id": 1, "username": 1, "coins": 1, "level": 1}
     ).sort("coins", -1).limit(50)
     
@@ -763,6 +995,10 @@ class CrashGameRequest(BaseModel):
 
 @api_router.post("/crash/play")
 async def crash_play(data: CrashGameRequest, user: dict = Depends(get_current_user)):
+    # Check if user is approved
+    if not user.get("approved", False):
+        raise HTTPException(status_code=403, detail="Ваш аккаунт ожидает одобрения администратора")
+    
     if data.betAmount < 10 or data.betAmount > 50000:
         raise HTTPException(status_code=400, detail="Ставка должна быть от 10 до 50000 монет")
     
@@ -860,11 +1096,41 @@ async def crash_complete(user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="Нет активной игры")
     
     # Money was already deducted in /crash/play
-    # Now just add winnings (bet + profit)
     bet_amount = active_game["betAmount"]
     profit = active_game["profit"]
+    won = active_game.get("won")
     
-    # Add back the bet amount + profit (winnings)
+    # Check if win is >5000 and needs admin approval
+    if won and profit > 5000:
+        # Create pending win for admin approval
+        pending_win = {
+            "id": str(uuid.uuid4()),
+            "userId": user["id"],
+            "username": user["username"],
+            "gameType": "crash",
+            "betAmount": bet_amount,
+            "multiplier": active_game["crashMultiplier"],
+            "coinsEarned": profit,
+            "xpEarned": 0,
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "status": "pending"
+        }
+        await db.pending_wins.insert_one(pending_win)
+        
+        # Clear active game
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$unset": {"activeCrashGame": ""}}
+        )
+        
+        return {
+            "pending": True,
+            "message": "Ваш выигрыш на рассмотрении администрации, ожидайте начисления",
+            "profit": profit,
+            "multiplier": active_game["crashMultiplier"]
+        }
+    
+    # Normal win/loss - add back the bet amount + profit (winnings)
     new_balance = user.get("coins", 0) + bet_amount + profit
     
     await db.users.update_one(
@@ -878,10 +1144,10 @@ async def crash_complete(user: dict = Depends(get_current_user)):
     return {
         "success": True,
         "crashMultiplier": active_game["crashMultiplier"],
-        "won": active_game["won"],
-        "betAmount": active_game["betAmount"],
-        "winAmount": active_game["betAmount"] + active_game["profit"] if active_game["won"] else 0,
-        "profit": active_game["profit"],
+        "won": won,  # Use the won variable, not active_game["won"]
+        "betAmount": bet_amount,
+        "winAmount": bet_amount + profit if won else 0,
+        "profit": profit,
         "newBalance": new_balance
     }
 
@@ -953,6 +1219,8 @@ async def startup_event():
             "clanCategory": False,
             "purchaseHistory": [],
             "isAdmin": True,
+            "isBanned": False,
+            "approved": True,  # Auto-approved for creator
             "lastGameTime": None,
             "lastDailyBonus": None,
             "lastWeeklyBonus": None,
