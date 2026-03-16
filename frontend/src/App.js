@@ -6,7 +6,8 @@ import {
   Home, Gamepad2, ShoppingCart, ArrowLeftRight, User, Shield, LogOut, 
   Coins, TrendingUp, Award, Users, Sun, Star, Package, Gift, 
   Send, Plus, RefreshCw, Eye, EyeOff, ChevronRight, Play, RotateCcw,
-  Palette, FolderTree, Search, Clock, History, Box, Trophy, Trash2
+  Palette, FolderTree, Search, Clock, History, Box, Trophy, Trash2,
+  Check, X, UserCheck
 } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -31,10 +32,8 @@ const AuthProvider = ({ children }) => {
 
   const register = async (username, password) => {
     const res = await axios.post(`${API}/auth/register`, { username, password });
-    localStorage.setItem("token", res.data.token);
-    setToken(res.data.token);
-    setUser(res.data.user);
-    return res.data;
+    // DO NOT login automatically - user must login manually after registration
+    return res.data; // Returns {success: true, message: "...", username: "..."}
   };
 
   const logout = () => {
@@ -340,9 +339,10 @@ const Register = () => {
     
     setLoading(true);
     try {
-      await register(username, password);
-      toast.success("Аккаунт создан!");
-      navigate("/dashboard");
+      const res = await register(username, password);
+      toast.success(res.message || "Аккаунт создан! Теперь войдите в систему");
+      // Redirect to login page instead of dashboard
+      navigate("/login");
     } catch (error) {
       toast.error(error.response?.data?.detail || "Ошибка регистрации");
     } finally { setLoading(false); }
@@ -937,11 +937,17 @@ const DodgeGameInner = () => {
 
   const endGame = async () => {
     const g = gameRef.current;
+    
+    // Ensure we're actually ending a running game
+    if (!g.running && gameState !== "playing") return;
+    
     g.running = false;
+    g.paused = false; // Clear pause state
     clearTimeout(g.spawnInterval);
     cancelAnimationFrame(g.animationId);
 
     const finalScore = g.score;
+    // Calculate actual playing time (excluding paused periods)
     const timePlayedSeconds = Math.floor((Date.now() - g.startTime) / 1000);
     setGameState("ended");
 
@@ -951,7 +957,13 @@ const DodgeGameInner = () => {
       const res = await axios.post(`${API}/game/submit`, { score: finalScore, timePlayedSeconds }, { headers: { Authorization: `Bearer ${token}` } });
       setLastResult(res.data);
       await refreshUser();
-      toast.success(`+${res.data.coinsEarned} монет, +${res.data.xpEarned} XP!`);
+      
+      // Check if win is pending approval
+      if (res.data.pending) {
+        toast.success(`Ваш выигрыш ожидает одобрения администрации`, { duration: 5000 });
+      } else {
+        toast.success(`+${res.data.coinsEarned} монет, +${res.data.xpEarned} XP!`);
+      }
     } catch (error) {
       toast.error(error.response?.data?.detail || "Ошибка");
     }
@@ -1146,10 +1158,7 @@ const DodgeGameInner = () => {
             }
 
             if (collision) {
-              g.running = false;
-              clearTimeout(g.spawnInterval);
-              cancelAnimationFrame(g.animationId);
-              setGameState("ended");
+              endGame();
             } else {
               g.animationId = requestAnimationFrame(resumeLoop);
             }
@@ -1270,7 +1279,7 @@ const DodgeGameInner = () => {
   );
 };
 
-// ==================== CLICKER GAME ====================
+// ==================== CRASH GAME ====================
 const CrashGameInner = () => {
   const { user, token, refreshUser } = useAuth();
   const [betAmount, setBetAmount] = useState(100);
@@ -1386,7 +1395,10 @@ const CrashGameInner = () => {
               setResult(completeRes.data);
               refreshUser();
 
-              if (completeRes.data.won === true) {
+              // Check if win is pending approval
+              if (completeRes.data.pending) {
+                toast.success(`Ваш выигрыш на рассмотрении администрации, ожидайте начисления`, { duration: 5000 });
+              } else if (completeRes.data.won === true) {
                 toast.success(`ВЫИГРЫШ! ${completeRes.data.crashMultiplier}x = +${completeRes.data.profit} монет!`, { duration: 5000 });
               } else if (completeRes.data.won === false) {
                 toast.error(`ПРОИГРЫШ! ${completeRes.data.crashMultiplier}x`, { duration: 3000 });
@@ -2226,6 +2238,8 @@ const Profile = () => {
 const AdminPanel = () => {
   const { user, token, refreshUser } = useAuth();
   const [users, setUsers] = useState([]);
+  const [pendingUsers, setPendingUsers] = useState([]);
+  const [pendingWins, setPendingWins] = useState([]);
   const [targetUsername, setTargetUsername] = useState("");
   const [coinsAmount, setCoinsAmount] = useState("");
   const [deleteUsername, setDeleteUsername] = useState("");
@@ -2246,6 +2260,24 @@ const AdminPanel = () => {
     }
   };
 
+  const loadPendingUsers = async () => {
+    try {
+      const res = await axios.get(`${API}/admin/pending-users`, { headers: { Authorization: `Bearer ${token}` } });
+      setPendingUsers(res.data);
+    } catch (error) {
+      toast.error("Ошибка загрузки ожидающих");
+    }
+  };
+
+  const loadPendingWins = async () => {
+    try {
+      const res = await axios.get(`${API}/admin/pending-wins`, { headers: { Authorization: `Bearer ${token}` } });
+      setPendingWins(res.data);
+    } catch (error) {
+      toast.error("Ошибка загрузки выигрышей");
+    }
+  };
+
   const checkIsCreator = async () => {
     try {
       const res = await axios.get(`${API}/admin/is-creator`, { headers: { Authorization: `Bearer ${token}` } });
@@ -2257,6 +2289,8 @@ const AdminPanel = () => {
 
   useEffect(() => { 
     loadUsers(); 
+    loadPendingUsers();
+    loadPendingWins();
     checkIsCreator();
   }, []);
 
@@ -2265,7 +2299,6 @@ const AdminPanel = () => {
     if (!targetUsername.trim()) { toast.error("Введите имя"); return; }
     const amount = parseInt(coinsAmount);
     if (!amount || amount <= 0) { toast.error("Введите сумму"); return; }
-    if (amount > 10000) { toast.error("Максимум 10,000 монет за раз"); return; }
 
     setLoading(true);
     try {
@@ -2410,6 +2443,53 @@ const AdminPanel = () => {
       const res = await axios.post(`${API}/admin/remove-admin`, { targetUsername: username, creatorPassword }, { headers: { Authorization: `Bearer ${token}` } });
       toast.success(res.data.message);
       loadUsers();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Ошибка");
+    }
+  };
+
+  const handleApproveUser = async (username) => {
+    try {
+      const res = await axios.post(`${API}/admin/approve-user`, { targetUsername: username }, { headers: { Authorization: `Bearer ${token}` } });
+      toast.success(res.data.message);
+      loadPendingUsers();
+      loadUsers();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Ошибка");
+    }
+  };
+
+  const handleDeletePending = async (username) => {
+    if (!window.confirm(`Удалить аккаунт ${username}?`)) return;
+    try {
+      const res = await axios.delete(`${API}/admin/delete-pending`, { 
+        data: { targetUsername: username },
+        headers: { Authorization: `Bearer ${token}` } 
+      });
+      toast.success(res.data.message);
+      loadPendingUsers();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Ошибка");
+    }
+  };
+
+  const handleApproveWin = async (winId) => {
+    try {
+      const res = await axios.post(`${API}/admin/approve-win`, { winId }, { headers: { Authorization: `Bearer ${token}` } });
+      toast.success(res.data.message);
+      loadPendingWins();
+      loadUsers();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Ошибка");
+    }
+  };
+
+  const handleRejectWin = async (winId) => {
+    if (!window.confirm('Отклонить этот выигрыш?')) return;
+    try {
+      const res = await axios.post(`${API}/admin/reject-win`, { winId }, { headers: { Authorization: `Bearer ${token}` } });
+      toast.success(res.data.message);
+      loadPendingWins();
     } catch (error) {
       toast.error(error.response?.data?.detail || "Ошибка");
     }
@@ -2615,11 +2695,152 @@ const AdminPanel = () => {
           </form>
         </div>
 
+        {/* Pending Wins Approval Section */}
+        <div className="card mb-8">
+          <div className="flex justify-between items-center mb-6">
+            <h2 className="font-orbitron text-lg flex items-center gap-2">
+              <Trophy size={18} /> ОДОБРЕНИЕ ВЫИГРЫШЕЙ
+            </h2>
+            <button onClick={loadPendingWins} className="btn-secondary flex items-center gap-2">
+              <RefreshCw size={14} /> ОБНОВИТЬ
+            </button>
+          </div>
+          <p className="text-gray-500 text-sm mb-4">Крупные выигрыши требующие одобрения (Crash >5000, Dodge >200)</p>
+          
+          {pendingWins.length === 0 ? (
+            <div className="text-center py-8 text-gray-500">
+              Нет выигрышей, ожидающих одобрения
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-white/10">
+                    <th className="text-left py-4 px-4 font-orbitron text-xs text-gray-400 uppercase tracking-wider">Игрок</th>
+                    <th className="text-left py-4 px-4 font-orbitron text-xs text-gray-400 uppercase tracking-wider">Игра</th>
+                    <th className="text-left py-4 px-4 font-orbitron text-xs text-gray-400 uppercase tracking-wider">Монеты</th>
+                    <th className="text-left py-4 px-4 font-orbitron text-xs text-gray-400 uppercase tracking-wider">XP</th>
+                    <th className="text-left py-4 px-4 font-orbitron text-xs text-gray-400 uppercase tracking-wider">Время</th>
+                    <th className="text-left py-4 px-4 font-orbitron text-xs text-gray-400 uppercase tracking-wider">Действия</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pendingWins.map((w, i) => (
+                    <tr key={w.id} className="border-b border-white/5 hover:bg-white/5">
+                      <td className="py-4 px-4 font-medium">{w.username}</td>
+                      <td className="py-4 px-4">
+                        <span className={`px-3 py-1 rounded text-xs font-bold ${w.gameType === 'dodge' ? 'bg-blue-500/20 text-blue-400' : 'bg-orange-500/20 text-orange-400'}`}>
+                          {w.gameType === 'dodge' ? 'Dodge Arena' : 'Crash'}
+                        </span>
+                      </td>
+                      <td className="py-4 px-4">
+                        <span className="text-yellow-400 font-bold">+{w.coinsEarned}</span>
+                      </td>
+                      <td className="py-4 px-4">
+                        <span className="text-purple-400 font-bold">+{w.xpEarned}</span>
+                      </td>
+                      <td className="py-4 px-4 text-gray-400 text-sm">
+                        {new Date(w.createdAt).toLocaleDateString('ru-RU', { 
+                          day: '2-digit', 
+                          month: '2-digit',
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        })}
+                      </td>
+                      <td className="py-4 px-4">
+                        <div className="flex gap-2">
+                          <button 
+                            onClick={() => handleApproveWin(w.id)} 
+                            className="px-4 py-2 text-sm bg-green-500/20 border border-green-500/50 text-green-400 hover:bg-green-500/30 transition-colors flex items-center gap-2"
+                          >
+                            <Check size={16} /> Одобрить
+                          </button>
+                          <button 
+                            onClick={() => handleRejectWin(w.id)} 
+                            className="px-4 py-2 text-sm bg-red-500/20 border border-red-500/50 text-red-400 hover:bg-red-500/30 transition-colors flex items-center gap-2"
+                          >
+                            <X size={16} /> Отклонить
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* Pending Users Approval Section */}
+        <div className="card mb-8">
+          <div className="flex justify-between items-center mb-6">
+            <h2 className="font-orbitron text-lg flex items-center gap-2">
+              <UserCheck size={18} /> РАЗРЕШЕНИЕ ДЛЯ ВХОДА
+            </h2>
+            <button onClick={loadPendingUsers} className="btn-secondary flex items-center gap-2">
+              <RefreshCw size={14} /> ОБНОВИТЬ
+            </button>
+          </div>
+          <p className="text-gray-500 text-sm mb-4">Пользователи, ожидающие одобрения для входа на платформу</p>
+          
+          {pendingUsers.length === 0 ? (
+            <div className="text-center py-8 text-gray-500">
+              Нет пользователей, ожидающих одобрения
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-white/10">
+                    <th className="text-left py-4 px-4 font-orbitron text-xs text-gray-400 uppercase tracking-wider">Имя</th>
+                    <th className="text-left py-4 px-4 font-orbitron text-xs text-gray-400 uppercase tracking-wider">IP Адрес</th>
+                    <th className="text-left py-4 px-4 font-orbitron text-xs text-gray-400 uppercase tracking-wider">Дата регистрации</th>
+                    <th className="text-left py-4 px-4 font-orbitron text-xs text-gray-400 uppercase tracking-wider">Действия</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pendingUsers.map((u, i) => (
+                    <tr key={u.id} className="border-b border-white/5 hover:bg-white/5">
+                      <td className="py-4 px-4 font-medium">{u.username}</td>
+                      <td className="py-4 px-4 text-gray-400 font-mono text-sm">{u.registrationIP || "N/A"}</td>
+                      <td className="py-4 px-4 text-gray-400 text-sm">
+                        {new Date(u.createdAt).toLocaleDateString('ru-RU', { 
+                          day: '2-digit', 
+                          month: '2-digit', 
+                          year: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        })}
+                      </td>
+                      <td className="py-4 px-4">
+                        <div className="flex gap-2">
+                          <button 
+                            onClick={() => handleApproveUser(u.username)} 
+                            className="px-4 py-2 text-sm bg-green-500/20 border border-green-500/50 text-green-400 hover:bg-green-500/30 transition-colors flex items-center gap-2"
+                          >
+                            <Check size={16} /> Впустить
+                          </button>
+                          <button 
+                            onClick={() => handleDeletePending(u.username)} 
+                            className="px-4 py-2 text-sm bg-red-500/20 border border-red-500/50 text-red-400 hover:bg-red-500/30 transition-colors flex items-center gap-2"
+                          >
+                            <X size={16} /> Удалить аккаунт
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
         {/* Users Table */}
         <div className="card">
           <div className="flex justify-between items-center mb-6">
             <h2 className="font-orbitron text-lg flex items-center gap-2">
-              <Users size={18} /> ВСЕ ПОЛЬЗОВАТЕЛИ
+              <Users size={18} /> ВСЕ ПОЛЬЗОВАТЕЛИ ОНЛАЙН
             </h2>
             <button onClick={loadUsers} className="btn-secondary flex items-center gap-2">
               <RefreshCw size={14} /> ОБНОВИТЬ
