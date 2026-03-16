@@ -177,7 +177,7 @@ async def submit_game_result(data: GameResult, user: dict = Depends(get_current_
     max_possible_score = data.timePlayedSeconds * 5
     if data.score > max_possible_score or data.score < 0:
         raise HTTPException(status_code=400, detail="Недопустимый результат игры")
-    if data.timePlayedSeconds > 120:
+    if data.timePlayedSeconds > 600:
         raise HTTPException(status_code=400, detail="Недопустимая продолжительность игры")
     
     now = datetime.now(timezone.utc)
@@ -263,16 +263,22 @@ async def purchase_item(data: PurchaseRequest, user: dict = Depends(get_current_
     if data.itemType == "custom_role":
         if not data.itemName:
             raise HTTPException(status_code=400, detail="Введите название роли")
+        if len(data.itemName) > 20:
+            raise HTTPException(status_code=400, detail="Название роли не более 20 символов")
         update_data["roles"] = user.get("roles", []) + [data.itemName]
     elif data.itemType == "custom_gradient":
         if not data.itemName:
             raise HTTPException(status_code=400, detail="Введите название градиента")
+        if len(data.itemName) > 20:
+            raise HTTPException(status_code=400, detail="Название градиента не более 20 символов")
         update_data["roleGradients"] = user.get("roleGradients", []) + [data.itemName]
     elif data.itemType == "create_clan":
         if user.get("clan"):
             raise HTTPException(status_code=400, detail="У вас уже есть клан")
         if not data.itemName:
             raise HTTPException(status_code=400, detail="Введите название клана")
+        if len(data.itemName) > 10:
+            raise HTTPException(status_code=400, detail="Название клана не более 10 символов")
         update_data["clan"] = data.itemName
     elif data.itemType == "clan_category":
         if not user.get("clan"):
@@ -407,6 +413,25 @@ async def admin_add_coins(data: AdminAddCoins, user: dict = Depends(get_current_
     await db.users.update_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"$inc": {"coins": data.amount}})
     
     return {"success": True, "addedCoins": data.amount, "toUser": target["username"], "newBalance": target["coins"] + data.amount}
+
+@api_router.post("/admin/remove-coins")
+async def admin_remove_coins(data: AdminAddCoins, user: dict = Depends(get_current_user)):
+    if not user.get("isAdmin"):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    if data.amount <= 0:
+        raise HTTPException(status_code=400, detail="Сумма должна быть положительной")
+    
+    target = await db.users.find_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    
+    # Don't allow negative balance
+    new_balance = max(0, target["coins"] - data.amount)
+    actual_removed = target["coins"] - new_balance
+    
+    await db.users.update_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"$set": {"coins": new_balance}})
+    
+    return {"success": True, "removedCoins": actual_removed, "fromUser": target["username"], "newBalance": new_balance}
 
 @api_router.get("/admin/users")
 async def admin_get_users(user: dict = Depends(get_current_user)):
@@ -589,48 +614,88 @@ async def get_leaderboard(user: dict = Depends(get_current_user)):
     leaders = await cursor.to_list(length=50)
     return leaders
 
-# ==================== CLICKER GAME ====================
-@api_router.post("/clicker/save")
-async def clicker_save_coins(data: ClickerSaveRequest, user: dict = Depends(get_current_user)):
-    if data.coins < 1 or data.coins > 1000:
-        raise HTTPException(status_code=400, detail="Некорректная сумма")
-    
-    await db.users.update_one(
-        {"id": user["id"]},
-        {"$inc": {"coins": data.coins}}
-    )
-    
-    return {"success": True, "coinsAdded": data.coins}
+# ==================== CRASH GAME ====================
+class CrashGameRequest(BaseModel):
+    betAmount: int
 
-@api_router.post("/clicker/upgrade")
-async def clicker_upgrade(data: ClickerUpgradeRequest, user: dict = Depends(get_current_user)):
-    upgrades = {
-        "clickPower": {"basePrice": 500, "maxLevel": 10, "field": "clickerClickPower"},
-        "autoClicker": {"basePrice": 1000, "maxLevel": 5, "field": "clickerAutoLevel"}
-    }
+@api_router.post("/crash/play")
+async def crash_play(data: CrashGameRequest, user: dict = Depends(get_current_user)):
+    # Validate bet amount
+    if data.betAmount < 10 or data.betAmount > 50000:
+        raise HTTPException(status_code=400, detail="Ставка должна быть от 10 до 50000 монет")
     
-    if data.upgradeType not in upgrades:
-        raise HTTPException(status_code=400, detail="Неверный тип улучшения")
-    
-    upgrade = upgrades[data.upgradeType]
-    current_level = user.get(upgrade["field"], 0)
-    
-    if current_level >= upgrade["maxLevel"]:
-        raise HTTPException(status_code=400, detail="Максимальный уровень достигнут")
-    
-    price = upgrade["basePrice"] + (current_level * 200)
-    
-    if user.get("coins", 0) < price:
+    if user.get("coins", 0) < data.betAmount:
         raise HTTPException(status_code=400, detail="Недостаточно монет")
     
+    # Generate crash duration (random between 1-40 seconds)
+    crash_time = round(random.uniform(1, 40), 2)
+    
+    # Generate crash multiplier - TRUE RANDOM with slight house edge
+    # Use exponential distribution for realistic casino-like results
+    # 55% chance to lose (<1.0x)
+    # 45% chance to win (>=1.0x)
+    
+    rand = random.random()
+    
+    if rand < 0.55:
+        # Lose: 0.2x - 0.99x (55% chance)
+        crash_multiplier = round(random.uniform(0.2, 0.99), 2)
+    else:
+        # Win: use exponential distribution for realistic results
+        # Most wins will be small (1.5x-3x), rare wins are big (10x+)
+        exponential_rand = random.expovariate(1.5)  # Lambda = 1.5
+        
+        # Map exponential to multiplier range
+        # 0-0.5 -> 1.0x-2x (most common wins)
+        # 0.5-1.5 -> 2x-5x (medium wins)
+        # 1.5-3 -> 5x-15x (rare wins)
+        # 3+ -> 15x-30x (very rare)
+        
+        if exponential_rand < 0.5:
+            crash_multiplier = round(random.uniform(1.0, 2.0), 2)
+        elif exponential_rand < 1.5:
+            crash_multiplier = round(random.uniform(2.0, 5.0), 2)
+        elif exponential_rand < 3:
+            crash_multiplier = round(random.uniform(5.0, 15.0), 2)
+        else:
+            crash_multiplier = round(random.uniform(15.0, 30.0), 2)
+    
+    # Calculate winnings
+    # If multiplier is exactly 1.0x - return bet (no win, no loss)
+    if crash_multiplier == 1.0:
+        winAmount = data.betAmount
+        profit = 0
+        new_balance = user.get("coins", 0)
+        won = None  # Draw
+    elif crash_multiplier > 1.0:
+        # Win
+        winAmount = int(data.betAmount * crash_multiplier)
+        profit = winAmount - data.betAmount
+        new_balance = user.get("coins", 0) + profit
+        won = True
+    else:
+        # Lose (< 1.0x)
+        winAmount = 0
+        profit = -data.betAmount
+        new_balance = user.get("coins", 0) - data.betAmount
+        won = False
+    
+    # Update user balance
     await db.users.update_one(
         {"id": user["id"]},
-        {
-            "$inc": {"coins": -price, upgrade["field"]: 1}
-        }
+        {"$set": {"coins": new_balance}}
     )
     
-    return {"success": True, "newLevel": current_level + 1}
+    return {
+        "success": True,
+        "crashMultiplier": crash_multiplier,
+        "crashTime": crash_time,
+        "won": won,
+        "betAmount": data.betAmount,
+        "winAmount": winAmount,
+        "profit": profit,
+        "newBalance": new_balance
+    }
 
 # ==================== SHOP CHESTS ====================
 class BuyChestRequest(BaseModel):
