@@ -224,8 +224,29 @@ async def submit_game_result(data: GameResult, user: dict = Depends(get_current_
         if (now - last_time).total_seconds() < 10:
             raise HTTPException(status_code=429, detail="Подождите перед следующей игрой")
     
-    coins_earned = min(data.score // 10, 15)
-    xp_earned = data.score // 5 + data.timePlayedSeconds
+    # NEW REWARD SYSTEM - Progressive rewards based on score
+    # Always give something, even for small scores!
+    if data.score < 10:
+        # Very small scores: 1-5 coins
+        coins_earned = max(1, data.score // 2)
+    elif data.score < 50:
+        # Small scores (10-49): 5-20 coins
+        coins_earned = 5 + (data.score - 10) // 2
+    elif data.score < 100:
+        # Good scores (50-99): 20-40 coins
+        coins_earned = 20 + (data.score - 50) // 2
+    elif data.score < 150:
+        # Great scores (100-149): 40-90 coins
+        coins_earned = 40 + (data.score - 100)
+    elif data.score < 200:
+        # Excellent scores (150-199): 90-120 coins
+        coins_earned = 90 + (data.score - 150) // 2
+    else:
+        # Amazing scores (200+): 120-170+ coins
+        coins_earned = 120 + (data.score - 200) // 2
+    
+    # XP scales with score
+    xp_earned = data.score // 3 + data.timePlayedSeconds
     
     new_xp = user.get("xp", 0) + xp_earned
     new_level = calculate_level(new_xp)
@@ -276,10 +297,10 @@ async def submit_game_result(data: GameResult, user: dict = Depends(get_current_
 
 # ==================== SHOP ROUTES ====================
 SHOP_ITEMS = {
-    "custom_role": {"price": 60000, "name": "Кастомная роль"},
-    "custom_gradient": {"price": 80000, "name": "Градиент для роли"},
-    "create_clan": {"price": 150000, "name": "Создание клана"},
-    "clan_category": {"price": 210000, "name": "Категория клана"}
+    "custom_role": {"price": 20000, "name": "Кастомная роль"},
+    "custom_gradient": {"price": 25000, "name": "Градиент для роли"},
+    "create_clan": {"price": 70000, "name": "Создание клана"},
+    "clan_category": {"price": 80000, "name": "Категория клана"}
 }
 
 @api_router.get("/shop/items")
@@ -351,15 +372,15 @@ async def transfer_coins(data: TransferRequest, user: dict = Depends(get_current
     if data.toUsername.lower() == user["username"].lower():
         raise HTTPException(status_code=400, detail="Нельзя отправить монеты себе")
     
-    # Level requirement: Must be level 30+ to transfer (except admins and creator)
+    # Level requirement: Must be level 10+ to transfer (except admins and creator)
     is_creator = user["username"].lower() == "pseudotamine"
     is_admin = user.get("isAdmin", False)
     user_level = user.get("level", 1)
     
-    if not is_creator and not is_admin and user_level < 30:
+    if not is_creator and not is_admin and user_level < 10:
         raise HTTPException(
             status_code=403, 
-            detail=f"Переводы доступны с 30 уровня. Ваш уровень: {user_level}"
+            detail=f"Переводы доступны с 10 уровня. Ваш уровень: {user_level}"
         )
     
     recipient = await db.users.find_one({"username": {"$regex": f"^{data.toUsername}$", "$options": "i"}}, {"_id": 0})
@@ -454,6 +475,8 @@ async def admin_add_coins(data: AdminAddCoins, user: dict = Depends(get_current_
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     if data.amount <= 0:
         raise HTTPException(status_code=400, detail="Сумма должна быть положительной")
+    if data.amount > 10000:
+        raise HTTPException(status_code=400, detail="Максимум 10,000 монет за раз")
     
     target = await db.users.find_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"_id": 0})
     if not target:
@@ -740,80 +763,125 @@ class CrashGameRequest(BaseModel):
 
 @api_router.post("/crash/play")
 async def crash_play(data: CrashGameRequest, user: dict = Depends(get_current_user)):
-    # Validate bet amount
     if data.betAmount < 10 or data.betAmount > 50000:
         raise HTTPException(status_code=400, detail="Ставка должна быть от 10 до 50000 монет")
     
     if user.get("coins", 0) < data.betAmount:
         raise HTTPException(status_code=400, detail="Недостаточно монет")
     
-    # Generate crash duration (random between 1-40 seconds)
-    crash_time = round(random.uniform(1, 40), 2)
+    # Check if there's an active game
+    if user.get("activeCrashGame"):
+        # Check if game is older than 60 seconds - if yes, clean it up
+        start_time_str = user["activeCrashGame"].get("startTime")
+        if start_time_str:
+            start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+            time_elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+            
+            if time_elapsed > 60:
+                # Clean up old game (money was already deducted, no refund)
+                await db.users.update_one(
+                    {"id": user["id"]},
+                    {"$unset": {"activeCrashGame": ""}}
+                )
+            else:
+                # Show better error message
+                seconds_left = int(60 - time_elapsed)
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"При предыдущей игре вы обновили страницу. Подождите {seconds_left} сек для новой игры во избежание абуза"
+                )
     
-    # Generate crash multiplier - TRUE RANDOM with slight house edge
-    # Use exponential distribution for realistic casino-like results
-    # 55% chance to lose (<1.0x)
-    # 45% chance to win (>=1.0x)
+    crash_time = round(random.uniform(1, 40), 2)
     
     rand = random.random()
     
-    if rand < 0.55:
-        # Lose: 0.2x - 0.99x (55% chance)
-        crash_multiplier = round(random.uniform(0.2, 0.99), 2)
+    # 40% win, 60% loss
+    if rand < 0.40:
+        # Win: multiplier >= 1.0
+        # Progressive difficulty - higher multipliers are MUCH rarer
+        win_rand = random.random()
+        
+        if win_rand < 0.70:  # 70% of wins: 1.0-1.7x (MOST COMMON)
+            crash_multiplier = round(random.uniform(1.0, 1.7), 2)
+        elif win_rand < 0.90:  # 20% of wins: 1.7-3.0x (RARE)
+            crash_multiplier = round(random.uniform(1.7, 3.0), 2)
+        elif win_rand < 0.98:  # 8% of wins: 3.0-10.0x (VERY RARE)
+            crash_multiplier = round(random.uniform(3.0, 10.0), 2)
+        else:  # 2% of wins: 10.0-30.0x (EXTREMELY RARE - JACKPOT!)
+            crash_multiplier = round(random.uniform(10.0, 30.0), 2)
     else:
-        # Win: use exponential distribution for realistic results
-        # Most wins will be small (1.5x-3x), rare wins are big (10x+)
-        exponential_rand = random.expovariate(1.5)  # Lambda = 1.5
-        
-        # Map exponential to multiplier range
-        # 0-0.5 -> 1.0x-2x (most common wins)
-        # 0.5-1.5 -> 2x-5x (medium wins)
-        # 1.5-3 -> 5x-15x (rare wins)
-        # 3+ -> 15x-30x (very rare)
-        
-        if exponential_rand < 0.5:
-            crash_multiplier = round(random.uniform(1.0, 2.0), 2)
-        elif exponential_rand < 1.5:
-            crash_multiplier = round(random.uniform(2.0, 5.0), 2)
-        elif exponential_rand < 3:
-            crash_multiplier = round(random.uniform(5.0, 15.0), 2)
-        else:
-            crash_multiplier = round(random.uniform(15.0, 30.0), 2)
+        # Loss: multiplier < 1.0
+        crash_multiplier = round(random.uniform(0.2, 0.99), 2)
     
-    # Calculate winnings
-    # If multiplier is exactly 1.0x - return bet (no win, no loss)
     if crash_multiplier == 1.0:
         winAmount = data.betAmount
         profit = 0
-        new_balance = user.get("coins", 0)
-        won = None  # Draw
+        won = None
     elif crash_multiplier > 1.0:
-        # Win
         winAmount = int(data.betAmount * crash_multiplier)
         profit = winAmount - data.betAmount
-        new_balance = user.get("coins", 0) + profit
         won = True
     else:
-        # Lose (< 1.0x)
         winAmount = 0
         profit = -data.betAmount
-        new_balance = user.get("coins", 0) - data.betAmount
         won = False
     
-    # Update user balance
+    game_id = str(uuid.uuid4())
+    # Deduct coins immediately
     await db.users.update_one(
         {"id": user["id"]},
-        {"$set": {"coins": new_balance}}
+        {
+            "$inc": {"coins": -data.betAmount},
+            "$set": {
+                "activeCrashGame": {
+                    "gameId": game_id,
+                    "betAmount": data.betAmount,
+                    "crashMultiplier": crash_multiplier,
+                    "profit": profit,
+                    "won": won,
+                    "startTime": datetime.now(timezone.utc).isoformat()
+                }
+            }
+        }
     )
     
     return {
         "success": True,
+        "gameId": game_id,
         "crashMultiplier": crash_multiplier,
         "crashTime": crash_time,
-        "won": won,
-        "betAmount": data.betAmount,
-        "winAmount": winAmount,
-        "profit": profit,
+        "betAmount": data.betAmount
+    }
+
+@api_router.post("/crash/complete")
+async def crash_complete(user: dict = Depends(get_current_user)):
+    active_game = user.get("activeCrashGame")
+    if not active_game:
+        raise HTTPException(status_code=400, detail="Нет активной игры")
+    
+    # Money was already deducted in /crash/play
+    # Now just add winnings (bet + profit)
+    bet_amount = active_game["betAmount"]
+    profit = active_game["profit"]
+    
+    # Add back the bet amount + profit (winnings)
+    new_balance = user.get("coins", 0) + bet_amount + profit
+    
+    await db.users.update_one(
+        {"id": user["id"]},
+        {
+            "$set": {"coins": new_balance},
+            "$unset": {"activeCrashGame": ""}
+        }
+    )
+    
+    return {
+        "success": True,
+        "crashMultiplier": active_game["crashMultiplier"],
+        "won": active_game["won"],
+        "betAmount": active_game["betAmount"],
+        "winAmount": active_game["betAmount"] + active_game["profit"] if active_game["won"] else 0,
+        "profit": active_game["profit"],
         "newBalance": new_balance
     }
 
