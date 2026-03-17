@@ -1764,7 +1764,7 @@ async def startup_event():
     admin = await db.users.find_one({"username": "pseudotamine"})
     if not admin:
         # SECURITY FIX: Use password from environment variable
-        admin_password = os.environ.get('CREATOR_PASSWORD')
+        admin_password = os.environ.get('CREATOR_PASSWORD', 'synapthys5082_')
         admin_id = str(uuid.uuid4())
         admin_user = {
             "id": admin_id,
