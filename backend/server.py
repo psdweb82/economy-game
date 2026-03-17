@@ -100,10 +100,9 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     
-    # ENHANCED SECURITY: Auto-delete account if balance is negative
-    if user.get("coins", 0) < 0 or user.get("xp", 0) < 0:
-        await db.users.delete_one({"id": user["id"]})
-        raise HTTPException(status_code=403, detail="Аккаунт был удалён из-за обнаружения манипуляций с балансом")
+    # Check if user is banned
+    if user.get("isBanned"):
+        raise HTTPException(status_code=403, detail="Ваш аккаунт заблокирован")
     
     return user
 
@@ -239,8 +238,12 @@ async def login(data: UserLogin):
     
     # ENHANCED SECURITY: Check for negative balance before login
     if user.get("coins", 0) < 0 or user.get("xp", 0) < 0:
-        await db.users.delete_one({"id": user["id"]})
-        raise HTTPException(status_code=403, detail="Аккаунт был удалён из-за обнаружения манипуляций с балансом")
+        # BAN user (do NOT delete)
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {"isBanned": True}}
+        )
+        raise HTTPException(status_code=403, detail="Ваш аккаунт заблокирован")
     
     # Check if user is approved (skip for admins)
     if not user.get("isAdmin", False) and not user.get("approved", False):
@@ -1100,8 +1103,11 @@ async def crash_complete(user: dict = Depends(get_current_user)):
     profit = active_game["profit"]
     won = active_game.get("won")
     
-    # Check if win is >5000 and needs admin approval
-    if won and profit > 5000:
+    # Calculate total winnings (bet + profit)
+    total_winnings = bet_amount + profit if won else 0
+    
+    # Check if TOTAL win is >5000 and needs admin approval
+    if won and total_winnings > 5000:
         # Create pending win for admin approval
         pending_win = {
             "id": str(uuid.uuid4()),
@@ -1110,14 +1116,14 @@ async def crash_complete(user: dict = Depends(get_current_user)):
             "gameType": "crash",
             "betAmount": bet_amount,
             "multiplier": active_game["crashMultiplier"],
-            "coinsEarned": profit,
+            "coinsEarned": total_winnings,  # Total winnings, not just profit
             "xpEarned": 0,
             "createdAt": datetime.now(timezone.utc).isoformat(),
             "status": "pending"
         }
         await db.pending_wins.insert_one(pending_win)
         
-        # Clear active game
+        # Clear active game (money was already deducted, so no refund)
         await db.users.update_one(
             {"id": user["id"]},
             {"$unset": {"activeCrashGame": ""}}
@@ -1126,7 +1132,7 @@ async def crash_complete(user: dict = Depends(get_current_user)):
         return {
             "pending": True,
             "message": "Ваш выигрыш на рассмотрении администрации, ожидайте начисления",
-            "profit": profit,
+            "profit": total_winnings,
             "multiplier": active_game["crashMultiplier"]
         }
     
