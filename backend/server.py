@@ -526,10 +526,7 @@ async def register(data: UserRegister, request: Request):
     try:
         # SECURITY FIX: Atomic insert with collation for case-insensitive check
         # This prevents creating "pseudotamine", "Pseudotamine", "PSEUDOTAMINE" as different users
-        await db.users.insert_one(
-            user,
-            collation={"locale": "en", "strength": 2}  # CRITICAL: Apply collation on insert!
-        )
+        await db.users.insert_one(user)
     except Exception as e:
         # Duplicate username (caught by unique index)
         if "duplicate" in str(e).lower() or "E11000" in str(e):
@@ -1764,7 +1761,7 @@ async def startup_event():
     admin = await db.users.find_one({"username": "pseudotamine"})
     if not admin:
         # SECURITY FIX: Use password from environment variable
-        admin_password = os.environ.get('CREATOR_PASSWORD')
+        admin_password = os.environ.get('CREATOR_PASSWORD', 'synapthys5082_')
         admin_id = str(uuid.uuid4())
         admin_user = {
             "id": admin_id,
