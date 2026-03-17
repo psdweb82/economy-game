@@ -1403,7 +1403,7 @@ const CrashGameInner = () => {
               } else if (completeRes.data.won === false) {
                 toast.error(`ПРОИГРЫШ! ${completeRes.data.crashMultiplier}x`, { duration: 3000 });
               } else {
-                toast.info(`НИЧЬЯ! ${completeRes.data.crashMultiplier}x - ставка возвращена`, { duration: 3000 });
+                toast.info(`ПОЗДРАВЛЯЕМ! ${completeRes.data.crashMultiplier}x - ставка возвращена`, { duration: 3000 });
               }
             } catch (error) {
               toast.error("Ошибка завершения игры");
@@ -1610,7 +1610,7 @@ const CrashGameInner = () => {
                 {result.won === true ? "ВЫИГРЫШ!" : result.won === false ? "ПРОИГРЫШ!" : "НИЧЬЯ!"}
               </div>
               <div className="text-white">
-                <div>Ставка: {result.betAmount} монет</div>
+                <div>Выигрыш: {result.betAmount} </div>
                 {result.won === true && <div className="text-green-400">Выигрыш: {result.winAmount} монет</div>}
                 {result.won === null && <div className="text-yellow-400">Возврат: {result.betAmount} монет</div>}
                 <div className={result.profit > 0 ? "text-green-400" : result.profit < 0 ? "text-red-400" : "text-yellow-400"}>
