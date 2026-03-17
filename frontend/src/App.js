@@ -13,7 +13,6 @@ import {
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
-// Auth Context
 const AuthContext = createContext(null);
 export const useAuth = () => useContext(AuthContext);
 
@@ -32,8 +31,7 @@ const AuthProvider = ({ children }) => {
 
   const register = async (username, password) => {
     const res = await axios.post(`${API}/auth/register`, { username, password });
-    // DO NOT login automatically - user must login manually after registration
-    return res.data; // Returns {success: true, message: "...", username: "..."}
+    return res.data; 
   };
 
   const logout = () => {
@@ -48,7 +46,6 @@ const AuthProvider = ({ children }) => {
       const res = await axios.get(`${API}/auth/me`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      // Check if user is banned
       if (res.data.isBanned) {
         toast.error("Ваш аккаунт заблокирован");
         logout();
@@ -60,7 +57,6 @@ const AuthProvider = ({ children }) => {
     }
   };
 
-  // Check ban status periodically
   useEffect(() => {
     if (!token || !user) return;
     const checkBanStatus = async () => {
@@ -73,10 +69,9 @@ const AuthProvider = ({ children }) => {
           logout();
         }
       } catch (e) {
-        // ignore
       }
     };
-    const interval = setInterval(checkBanStatus, 5000); // Check every 5 seconds
+    const interval = setInterval(checkBanStatus, 5000); 
     return () => clearInterval(interval);
   }, [token, user]);
 
@@ -104,7 +99,6 @@ const AuthProvider = ({ children }) => {
   );
 };
 
-// ==================== NAVBAR ====================
 const Navbar = () => {
   const { user, logout } = useAuth();
   const location = useLocation();
@@ -137,7 +131,6 @@ const Navbar = () => {
     { path: "/profile", label: "Профиль", icon: User },
   ];
 
-  // Add admin to navbar for admins
   const allNavItems = [...navItems];
   if (user?.isAdmin) {
     allNavItems.push({ path: "/admin", label: "Админ", icon: Shield });
@@ -151,7 +144,6 @@ const Navbar = () => {
             <span className="text-glow">⛧</span> sukunaW
           </Link>
 
-          {/* Desktop Nav */}
           <div className="hidden lg:flex items-center gap-5">
             {allNavItems.map((item) => (
               <Link
@@ -195,9 +187,7 @@ const Navbar = () => {
         </div>
       </nav>
 
-      {/* Mobile Bottom Nav */}
       <div className="lg:hidden fixed bottom-0 left-0 right-0 bg-black/95 backdrop-blur-md border-t border-white/10 z-50">
-        {/* Main icons row */}
         <div className="flex justify-around items-center py-2">
           {allNavItems.slice(0, 4).map((item) => (
             <Link
@@ -210,7 +200,6 @@ const Navbar = () => {
               <span className="text-[9px] font-orbitron">{item.label}</span>
             </Link>
           ))}
-          {/* More button */}
           <button
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
             className={`flex flex-col items-center gap-0.5 py-1 px-2 ${mobileMenuOpen ? "text-white" : "text-gray-500"}`}
@@ -220,7 +209,6 @@ const Navbar = () => {
           </button>
         </div>
 
-        {/* Expandable menu */}
         {mobileMenuOpen && (
           <div className="border-t border-white/10 py-3 px-4 bg-black/95">
             <div className="grid grid-cols-3 gap-3">
@@ -247,7 +235,7 @@ const Navbar = () => {
   );
 };
 
-// ==================== LOGIN ====================
+
 const Login = () => {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -320,7 +308,6 @@ const Login = () => {
   );
 };
 
-// ==================== REGISTER ====================
 const Register = () => {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -341,7 +328,6 @@ const Register = () => {
     try {
       const res = await register(username, password);
       toast.success(res.message || "Аккаунт создан! Теперь войдите в систему");
-      // Redirect to login page instead of dashboard
       navigate("/login");
     } catch (error) {
       toast.error(error.response?.data?.detail || "Ошибка регистрации");
@@ -402,7 +388,6 @@ const Register = () => {
   );
 };
 
-// ==================== DASHBOARD ====================
 const Dashboard = () => {
   const { user, token, refreshUser } = useAuth();
   const [claiming, setClaiming] = useState(false);
@@ -446,7 +431,6 @@ const Dashboard = () => {
         </h1>
         <p className="text-gray-500 font-rajdhani mb-8">Ваш командный центр</p>
 
-        {/* Stats */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
           <div className="card animate-fade-in">
             <div className="w-12 h-12 flex items-center justify-center bg-yellow-500/10 border border-yellow-500/30 mb-3">
@@ -480,7 +464,6 @@ const Dashboard = () => {
           </div>
         </div>
 
-        {/* Bonuses */}
         <h2 className="font-orbitron text-xl font-bold text-white mb-4 tracking-wider flex items-center gap-2">
           <Gift size={20} /> БОНУСЫ
         </h2>
@@ -517,7 +500,6 @@ const Dashboard = () => {
           </div>
         </div>
 
-        {/* Chests */}
         {chests.length > 0 && (
           <div className="mb-8">
             <h2 className="font-orbitron text-xl font-bold text-white mb-4 tracking-wider flex items-center gap-2">
@@ -531,7 +513,6 @@ const Dashboard = () => {
           </div>
         )}
 
-        {/* Quick Actions */}
         <h2 className="font-orbitron text-xl font-bold text-white mb-4 tracking-wider flex items-center gap-2">
           <ChevronRight size={20} /> БЫСТРЫЕ ДЕЙСТВИЯ
         </h2>
@@ -554,7 +535,6 @@ const Dashboard = () => {
   );
 };
 
-// ==================== CHEST CARD ====================
 const ChestCard = ({ chest }) => {
   const { token, refreshUser } = useAuth();
   const [opening, setOpening] = useState(false);
@@ -574,14 +554,11 @@ const ChestCard = ({ chest }) => {
 
   const style = getChestStyle(chest.type);
 
-  // Generate random items for roulette
   const generateRouletteItems = (min, max, actualReward) => {
     const items = [];
-    // Generate 50 random values
     for (let i = 0; i < 50; i++) {
       items.push(Math.floor(Math.random() * (max - min + 1)) + min);
     }
-    // Place actual reward at position 42 (where it will stop)
     items[42] = actualReward;
     return items;
   };
@@ -592,13 +569,11 @@ const ChestCard = ({ chest }) => {
       const res = await axios.post(`${API}/chest/open`, { chestId: chest.id }, { headers: { Authorization: `Bearer ${token}` } });
       const reward = res.data.coinsWon;
       
-      // Generate roulette items
       const items = generateRouletteItems(style.minCoins, style.maxCoins, reward);
       setRouletteItems(items);
       setFinalReward(reward);
       setShowRoulette(true);
       
-      // Start animation after a small delay
       setTimeout(() => {
         if (rouletteRef.current) {
           rouletteRef.current.style.transition = 'transform 4s cubic-bezier(0.15, 0.85, 0.35, 1)';
@@ -606,7 +581,6 @@ const ChestCard = ({ chest }) => {
         }
       }, 100);
       
-      // Show result after animation
       setTimeout(() => {
         setShowRoulette(false);
         setResult(res.data);
@@ -620,23 +594,18 @@ const ChestCard = ({ chest }) => {
     }
   };
 
-  // Roulette modal
   if (showRoulette) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90" onClick={(e) => e.stopPropagation()}>
         <div className="w-full max-w-2xl mx-4">
-          {/* Chest type header */}
           <div className={`text-center mb-6 font-orbitron text-xl ${style.color}`}>
             {style.name} сундук
           </div>
           
-          {/* Roulette container */}
           <div className="relative overflow-hidden bg-black/50 border border-white/20 p-4">
-            {/* Center marker */}
             <div className="absolute top-0 left-1/2 -translate-x-1/2 w-1 h-full bg-yellow-400 z-10 shadow-[0_0_20px_rgba(250,204,21,0.8)]" />
             <div className="absolute top-0 left-1/2 -translate-x-1/2 w-0 h-0 border-l-[12px] border-r-[12px] border-t-[16px] border-l-transparent border-r-transparent border-t-yellow-400 z-10" />
             
-{/* Roulette strip */}
 <div 
   ref={rouletteRef}
   className="flex items-center gap-2 py-4"
@@ -683,7 +652,6 @@ const ChestCard = ({ chest }) => {
   );
 };
 
-// ==================== DODGE GAME ====================
 const DodgeGameInner = () => {
   const { user, token, refreshUser } = useAuth();
   const canvasRef = useRef(null);
@@ -708,7 +676,6 @@ const DodgeGameInner = () => {
   const keysRef = useRef({ up: false, down: false, left: false, right: false });
   const touchRef = useRef({ x: null, y: null });
 
-  // Keyboard events - attach to window
   useEffect(() => {
     const handleKeyDown = (e) => {
       const key = e.key.toLowerCase();
@@ -735,7 +702,6 @@ const DodgeGameInner = () => {
     };
   }, []);
 
-  // Touch handlers
   const handleTouchStart = (e) => {
     if (!gameRef.current.running) return;
     e.preventDefault();
@@ -764,21 +730,18 @@ const DodgeGameInner = () => {
     
     const player = g.player;
     
-    // 70% chance enemy targets player, 30% random
     const targetPlayer = Math.random() < 0.7;
     let x, vx, vy;
     
     if (targetPlayer) {
-      // Spawn from top, aim at player
       x = Math.random() * 600;
       const dx = player.x - x;
-      const dy = player.y + 50; // aim slightly ahead
+      const dy = player.y + 50; 
       const dist = Math.sqrt(dx * dx + dy * dy);
       const baseSpeed = (2 + Math.random() * 2) * g.speedMultiplier;
       vx = (dx / dist) * baseSpeed * 0.5;
       vy = (dy / dist) * baseSpeed;
     } else {
-      // Random movement
       x = Math.random() * 540 + 30;
       vx = (Math.random() - 0.5) * 2;
       vy = (2 + Math.random() * 2) * g.speedMultiplier;
@@ -809,18 +772,15 @@ const DodgeGameInner = () => {
     setGameState("playing");
     setLastResult(null);
 
-    // Spawn enemies - starts faster, gets even faster
     let spawnRate = 1200;
     const scheduleSpawn = () => {
       if (!g.running || g.paused) return;
       spawnEnemy();
-      // Decrease spawn rate as score increases
       spawnRate = Math.max(400, 1200 - g.score * 15);
       g.spawnInterval = setTimeout(scheduleSpawn, spawnRate);
     };
     g.spawnInterval = setTimeout(scheduleSpawn, 500);
 
-    // Game loop
     const loop = () => {
       if (!g.running || g.paused) return;
       
@@ -828,13 +788,11 @@ const DodgeGameInner = () => {
       const touch = touchRef.current;
       const speed = 6;
 
-      // Keyboard movement
       if (keys.up && g.player.y > g.player.size) g.player.y -= speed;
       if (keys.down && g.player.y < 400 - g.player.size) g.player.y += speed;
       if (keys.left && g.player.x > g.player.size) g.player.x -= speed;
       if (keys.right && g.player.x < 600 - g.player.size) g.player.x += speed;
 
-      // Touch movement
       if (touch.x !== null && touch.y !== null) {
         const dx = touch.x - g.player.x;
         const dy = touch.y - g.player.y;
@@ -845,32 +803,26 @@ const DodgeGameInner = () => {
         }
       }
 
-      // Constrain player within canvas boundaries
       g.player.x = Math.max(g.player.size, Math.min(600 - g.player.size, g.player.x));
       g.player.y = Math.max(g.player.size, Math.min(400 - g.player.size, g.player.y));
 
-      // Speed increases at milestones
       if (g.score >= 50) g.speedMultiplier = 1.5;
       if (g.score >= 100) g.speedMultiplier = 2;
       if (g.score >= 150) g.speedMultiplier = 2.5;
 
-      // Update enemies
       let collision = false;
       g.enemies = g.enemies.filter((e) => {
         e.x += e.vx;
         e.y += e.vy;
         
-        // Bounce off walls
         if (e.x < e.size/2 || e.x > 600 - e.size/2) e.vx *= -1;
         
-        // Check collision
         const dx = g.player.x - e.x;
         const dy = g.player.y - e.y;
         if (Math.sqrt(dx * dx + dy * dy) < (g.player.size + e.size) / 2) {
           collision = true;
         }
         
-        // Remove if off screen
         if (e.y > 420) {
           g.score++;
           setScore(g.score);
@@ -879,22 +831,18 @@ const DodgeGameInner = () => {
         return true;
       });
 
-      // Draw
       const canvas = canvasRef.current;
       if (canvas) {
         const ctx = canvas.getContext("2d");
         
-        // Background
         ctx.fillStyle = "#050505";
         ctx.fillRect(0, 0, 600, 400);
 
-        // Grid
         ctx.strokeStyle = "rgba(255, 255, 255, 0.03)";
         ctx.lineWidth = 1;
         for (let i = 0; i < 600; i += 30) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, 400); ctx.stroke(); }
         for (let i = 0; i < 400; i += 30) { ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(600, i); ctx.stroke(); }
 
-        // Enemies
         g.enemies.forEach((e) => {
           ctx.fillStyle = "rgba(239, 68, 68, 0.9)";
           ctx.shadowColor = "#EF4444";
@@ -902,7 +850,6 @@ const DodgeGameInner = () => {
           ctx.fillRect(e.x - e.size/2, e.y - e.size/2, e.size, e.size);
         });
 
-        // Player
         ctx.fillStyle = "#FFFFFF";
         ctx.shadowColor = "#FFFFFF";
         ctx.shadowBlur = 20;
@@ -914,7 +861,6 @@ const DodgeGameInner = () => {
         ctx.fill();
         ctx.shadowBlur = 0;
 
-        // HUD
         ctx.fillStyle = "#FFFFFF";
         ctx.font = "bold 16px Orbitron, monospace";
         ctx.textAlign = "left";
@@ -938,16 +884,14 @@ const DodgeGameInner = () => {
   const endGame = async () => {
     const g = gameRef.current;
     
-    // Ensure we're actually ending a running game
     if (!g.running && gameState !== "playing") return;
     
     g.running = false;
-    g.paused = false; // Clear pause state
+    g.paused = false; 
     clearTimeout(g.spawnInterval);
     cancelAnimationFrame(g.animationId);
 
     const finalScore = g.score;
-    // Calculate actual playing time (excluding paused periods)
     const timePlayedSeconds = Math.floor((Date.now() - g.startTime) / 1000);
     setGameState("ended");
 
@@ -958,7 +902,6 @@ const DodgeGameInner = () => {
       setLastResult(res.data);
       await refreshUser();
       
-      // Check if win is pending approval
       if (res.data.pending) {
         toast.success(`Ваш выигрыш ожидает одобрения администрации`, { duration: 5000 });
       } else {
@@ -969,7 +912,6 @@ const DodgeGameInner = () => {
     }
   };
 
-  // Draw idle state
   useEffect(() => {
     if (gameState === "idle") {
       const canvas = canvasRef.current;
@@ -990,46 +932,37 @@ const DodgeGameInner = () => {
     }
   }, [gameState]);
 
-  // Page Visibility API - pause game when tab is hidden
   useEffect(() => {
     const handleVisibilityChange = () => {
       const g = gameRef.current;
       if (!g.running) return;
       
       if (document.hidden) {
-        // Tab became hidden - pause the game
         g.paused = true;
         g.pausedTime = Date.now();
         
-        // Stop spawn interval
         if (g.spawnInterval) {
           clearTimeout(g.spawnInterval);
           g.spawnInterval = null;
         }
         
-        // Cancel animation frame
         if (g.animationId) {
           cancelAnimationFrame(g.animationId);
           g.animationId = null;
         }
       } else {
-        // Tab became visible - resume the game
         if (g.paused) {
           g.paused = false;
           
-          // Adjust start time to account for paused duration
           const pauseDuration = Date.now() - g.pausedTime;
           g.startTime += pauseDuration;
           
-          // Clear any existing enemies to prevent spam
           g.enemies = [];
-          
-          // Restart spawn interval
+
           let spawnRate = Math.max(400, 1200 - g.score * 15);
           const scheduleSpawn = () => {
             if (!g.running || g.paused) return;
             
-            // Spawn enemy logic (inlined to avoid dependency issues)
             const player = g.player;
             const targetPlayer = Math.random() < 0.7;
             let x, vx, vy;
@@ -1061,7 +994,6 @@ const DodgeGameInner = () => {
           };
           g.spawnInterval = setTimeout(scheduleSpawn, spawnRate);
           
-          // Resume game loop (main loop will continue via startGame)
           const canvas = canvasRef.current;
           const resumeLoop = () => {
             if (!g.running || g.paused) return;
@@ -1070,13 +1002,11 @@ const DodgeGameInner = () => {
             const touch = touchRef.current;
             const speed = 6;
 
-            // Keyboard movement
             if (keys.up && g.player.y > g.player.size) g.player.y -= speed;
             if (keys.down && g.player.y < 400 - g.player.size) g.player.y += speed;
             if (keys.left && g.player.x > g.player.size) g.player.x -= speed;
             if (keys.right && g.player.x < 600 - g.player.size) g.player.x += speed;
 
-            // Touch movement
             if (touch.x !== null && touch.y !== null) {
               const dx = touch.x - g.player.x;
               const dy = touch.y - g.player.y;
@@ -1087,16 +1017,13 @@ const DodgeGameInner = () => {
               }
             }
 
-            // Constrain player
             g.player.x = Math.max(g.player.size, Math.min(600 - g.player.size, g.player.x));
             g.player.y = Math.max(g.player.size, Math.min(400 - g.player.size, g.player.y));
 
-            // Speed increases
             if (g.score >= 50) g.speedMultiplier = 1.5;
             if (g.score >= 100) g.speedMultiplier = 2;
             if (g.score >= 150) g.speedMultiplier = 2.5;
 
-            // Update enemies
             let collision = false;
             g.enemies = g.enemies.filter((e) => {
               e.x += e.vx;
@@ -1118,7 +1045,6 @@ const DodgeGameInner = () => {
               return true;
             });
 
-            // Draw
             if (canvas) {
               const ctx = canvas.getContext("2d");
               ctx.fillStyle = "#050505";
@@ -1175,7 +1101,6 @@ const DodgeGameInner = () => {
     };
   }, []);
 
-  // Cleanup
   useEffect(() => {
     return () => {
       const g = gameRef.current;
@@ -1279,11 +1204,10 @@ const DodgeGameInner = () => {
   );
 };
 
-// ==================== CRASH GAME ====================
 const CrashGameInner = () => {
   const { user, token, refreshUser } = useAuth();
   const [betAmount, setBetAmount] = useState(100);
-  const [gameState, setGameState] = useState("idle"); // idle, playing, crashed
+  const [gameState, setGameState] = useState("idle"); 
   const [multiplier, setMultiplier] = useState(1.0);
   const [result, setResult] = useState(null);
   const [playing, setPlaying] = useState(false);
@@ -1317,7 +1241,6 @@ const CrashGameInner = () => {
     try {
       const res = await axios.post(`${API}/crash/play`, { betAmount }, { headers: { Authorization: `Bearer ${token}` } });
       
-      // Start animation
       setGameState("playing");
       setMultiplier(1.0);
       
@@ -1325,12 +1248,10 @@ const CrashGameInner = () => {
       g.running = true;
       g.startTime = Date.now();
       g.crashPoint = res.data.crashMultiplier;
-      g.crashTime = res.data.crashTime * 1000; // Convert to ms
+      g.crashTime = res.data.crashTime * 1000; 
       g.path = [{x: 0, y: 1.0}];
       g.currentMultiplier = 1.0;
 
-      // Animate graph with smooth random movement
-      // Use setInterval for stable animation even when tab is hidden
       const intervalId = setInterval(() => {
         if (!g.running) {
           clearInterval(intervalId);
@@ -1340,47 +1261,34 @@ const CrashGameInner = () => {
         const elapsed = Date.now() - g.startTime;
         const progress = Math.min(elapsed / g.crashTime, 1);
 
-        // UNPREDICTABLE MOVEMENT - like real casino!
-        // Graph moves randomly until the very end
         
         if (progress < 0.85) {
-          // First 85% - completely random movement
-          // Can go up and down, making it impossible to predict
-          const randomChange = (Math.random() - 0.5) * 0.4; // Bigger random jumps
+          const randomChange = (Math.random() - 0.5) * 0.4; 
           let newMultiplier = g.currentMultiplier + randomChange;
           
-          // Add some momentum - if going up, tend to keep going up (and vice versa)
           const momentum = g.lastChange || 0;
           newMultiplier += momentum * 0.3;
           g.lastChange = randomChange;
           
-          // Randomly jump between 0.3x and 3x during this phase
           newMultiplier = Math.max(0.3, Math.min(3, newMultiplier));
           
           g.currentMultiplier = newMultiplier;
         } else {
-          // Last 15% - dramatic move to final result!
-          // This is where the "surprise" happens
-          const endProgress = (progress - 0.85) / 0.15; // 0 to 1 in last 15%
+          const endProgress = (progress - 0.85) / 0.15; 
           
-          // Smooth transition to actual crash point
           const targetMultiplier = g.crashPoint;
           g.currentMultiplier = g.currentMultiplier + (targetMultiplier - g.currentMultiplier) * endProgress * 0.5;
         }
         
-        // Add point less frequently for smoother line (every 50ms worth of progress)
         if (g.path.length === 0 || elapsed - (g.path[g.path.length - 1].time || 0) > 50) {
           g.path.push({ x: progress, y: g.currentMultiplier, time: elapsed });
         }
 
-        // Update display
         setMultiplier(g.currentMultiplier);
 
-        // Draw graph
         drawGraph(g.path, progress);
 
         if (progress >= 1) {
-          // Crash!
           clearInterval(intervalId);
           g.running = false;
           g.currentMultiplier = g.crashPoint;
@@ -1388,14 +1296,12 @@ const CrashGameInner = () => {
           setGameState("crashed");
           setPlaying(false);
 
-          // Complete the game on backend
           (async () => {
             try {
               const completeRes = await axios.post(`${API}/crash/complete`, {}, { headers: { Authorization: `Bearer ${token}` } });
               setResult(completeRes.data);
               refreshUser();
 
-              // Check if win is pending approval
               if (completeRes.data.pending) {
                 toast.success(`Ваш выигрыш на рассмотрении администрации, ожидайте начисления`, { duration: 5000 });
               } else if (completeRes.data.won === true) {
@@ -1410,7 +1316,7 @@ const CrashGameInner = () => {
             }
           })();
         }
-      }, 50); // setInterval runs every 50ms
+      }, 50);
     } catch (error) {
       const errorMsg = error.response?.data?.detail || "Ошибка";
       toast.error(errorMsg);
@@ -1427,11 +1333,9 @@ const CrashGameInner = () => {
     const width = canvas.width;
     const height = canvas.height;
     
-    // Clear canvas
     ctx.fillStyle = "#050505";
     ctx.fillRect(0, 0, width, height);
     
-    // Grid lines
     ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
     ctx.lineWidth = 1;
     for (let i = 0; i <= 10; i++) {
@@ -1451,13 +1355,11 @@ const CrashGameInner = () => {
     
     if (path.length < 2) return;
     
-    // Find min/max for scaling
     const minY = Math.min(...path.map(p => p.y));
     const maxY = Math.max(...path.map(p => p.y));
     const yRange = maxY - minY || 1;
     const yPadding = yRange * 0.15;
     
-    // Convert to canvas coordinates
     const points = path.map(point => {
       const x = point.x * width;
       const normalizedY = (point.y - minY + yPadding) / (yRange + 2 * yPadding);
@@ -1465,12 +1367,10 @@ const CrashGameInner = () => {
       return { x, y, originalY: point.y };
     });
     
-    // Line color
     const lineColor = progress >= 1 
       ? (gameRef.current.crashPoint >= 1.0 ? "#10b981" : "#ef4444")
       : "#fbbf24";
     
-    // Draw gradient fill under the line (ONLY up to current position)
     const gradient = ctx.createLinearGradient(0, 0, 0, height);
     gradient.addColorStop(0, lineColor + "40");
     gradient.addColorStop(1, lineColor + "00");
@@ -1479,7 +1379,6 @@ const CrashGameInner = () => {
     ctx.beginPath();
     ctx.moveTo(points[0].x, height);
     
-    // Smooth curve through points
     for (let i = 0; i < points.length - 1; i++) {
       const current = points[i];
       const next = points[i + 1];
@@ -1494,14 +1393,11 @@ const CrashGameInner = () => {
     
     const lastPoint = points[points.length - 1];
     ctx.lineTo(lastPoint.x, lastPoint.y);
-    
-    // Close gradient path at CURRENT position (not at right edge)
     ctx.lineTo(lastPoint.x, height);
     ctx.lineTo(points[0].x, height);
     ctx.closePath();
     ctx.fill();
     
-    // Draw main curve line
     ctx.strokeStyle = lineColor;
     ctx.lineWidth = 4;
     ctx.lineJoin = "round";
@@ -1520,12 +1416,10 @@ const CrashGameInner = () => {
       ctx.quadraticCurveTo(current.x, current.y, midX, midY);
     }
     
-    // End at last point
     ctx.lineTo(lastPoint.x, lastPoint.y);
     ctx.stroke();
     ctx.shadowBlur = 0;
     
-    // Draw circle at current position
     ctx.fillStyle = lineColor;
     ctx.strokeStyle = lineColor;
     ctx.lineWidth = 3;
@@ -1534,7 +1428,6 @@ const CrashGameInner = () => {
     ctx.arc(lastPoint.x, lastPoint.y, 8, 0, Math.PI * 2);
     ctx.fill();
     
-    // Outer glow ring
     ctx.shadowColor = lineColor;
     ctx.shadowBlur = 20;
     ctx.beginPath();
@@ -1549,7 +1442,6 @@ const CrashGameInner = () => {
     setMultiplier(1.0);
     setResult(null);
     
-    // Clear canvas
     const canvas = canvasRef.current;
     if (canvas) {
       const ctx = canvas.getContext("2d");
@@ -1567,10 +1459,9 @@ const CrashGameInner = () => {
         <p className="text-gray-400 mt-3 text-sm md:text-base">Ставь и угадывай множитель!</p>
       </div>
 
-      {/* Game Display */}
       <div className="card p-4 md:p-8 mb-6 md:mb-8 text-center">
         <div className="relative mx-auto max-w-2xl">
-          {/* Multiplier Display */}
+
           <div className={`mb-6 ${gameState === "playing" ? "animate-pulse" : ""}`}>
             <div className={`font-orbitron text-5xl md:text-7xl font-bold transition-all duration-300 ${
               gameState === "crashed" 
@@ -1581,7 +1472,6 @@ const CrashGameInner = () => {
             </div>
           </div>
 
-          {/* Canvas for Graph */}
           <div className="mb-6 flex justify-center">
             <canvas 
               ref={canvasRef} 
@@ -1623,10 +1513,9 @@ const CrashGameInner = () => {
             </div>
           )}
 
-          {/* Bet Controls */}
           {gameState === "idle" && (
             <div className="space-y-6">
-              {/* Quick Bet Buttons */}
+            
               <div className="grid grid-cols-5 gap-2">
                 {quickBets.map((amount) => (
                   <button
@@ -1644,7 +1533,6 @@ const CrashGameInner = () => {
                 ))}
               </div>
 
-              {/* Custom Bet Input */}
               <div>
                 <label className="label-text">Сумма ставки (10 - 50000)</label>
                 <input
@@ -1659,7 +1547,6 @@ const CrashGameInner = () => {
                 />
               </div>
 
-              {/* Start Button */}
               <button
                 onClick={startGame}
                 disabled={playing || betAmount < 10 || betAmount > 50000 || (user?.coins || 0) < betAmount}
@@ -1669,7 +1556,6 @@ const CrashGameInner = () => {
                 {playing ? "..." : `ИГРАТЬ (${betAmount} монет)`}
               </button>
 
-              {/* User Balance */}
               <div className="text-gray-400 text-sm">
                 Ваш баланс: <span className="text-yellow-400 font-bold">{user?.coins || 0}</span> монет
               </div>
@@ -1678,7 +1564,6 @@ const CrashGameInner = () => {
         </div>
       </div>
 
-      {/* Game Info */}
       <div className="grid md:grid-cols-2 gap-4 max-w-2xl mx-auto">
         <div className="card p-4">
           <h3 className="font-orbitron text-sm font-bold text-white mb-3 flex items-center gap-2">
@@ -1705,9 +1590,9 @@ const CrashGameInner = () => {
   );
 };
 
-// ==================== GAMES HUB ====================
+
 const GamesHub = () => {
-  const [activeGame, setActiveGame] = useState(null); // null, 'dodge', 'crash'
+  const [activeGame, setActiveGame] = useState(null); 
 
   return (
     <div className="main-content">
@@ -1723,7 +1608,6 @@ const GamesHub = () => {
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 md:gap-8 max-w-4xl mx-auto">
-              {/* Dodge Game Card */}
               <div 
                 className="card cursor-pointer hover:border-white/40 transition-all active:scale-95 md:hover:scale-105 p-4 md:p-8"
                 onClick={() => setActiveGame('dodge')}
@@ -1741,7 +1625,6 @@ const GamesHub = () => {
                 </div>
               </div>
 
-              {/* Crash Game Card */}
               <div 
                 className="card cursor-pointer hover:border-white/40 transition-all active:scale-95 md:hover:scale-105 p-4 md:p-8"
                 onClick={() => setActiveGame('crash')}
@@ -1790,7 +1673,6 @@ const GamesHub = () => {
   );
 };
 
-// ==================== SHOP ====================
 const Shop = () => {
   const { user, token, refreshUser } = useAuth();
   const [purchasing, setPurchasing] = useState(false);
@@ -1820,7 +1702,6 @@ const Shop = () => {
   const purchase = async (itemType, needsName, label) => {
     let itemName = null;
     if (needsName) {
-      // Get max length based on item type
       let maxLength = 20;
       if (itemType === "create_clan" || itemType === "clan_category") {
         maxLength = 10;
@@ -1829,7 +1710,6 @@ const Shop = () => {
       itemName = prompt(`Введите название для "${label}" (макс ${maxLength} символов):`);
       if (!itemName) return;
       
-      // Validate length on frontend
       if (itemName.length > maxLength) {
         toast.error(`Название не более ${maxLength} символов`);
         return;
@@ -1897,7 +1777,6 @@ const Shop = () => {
           ))}
         </div>
 
-        {/* Chests section */}
         <h2 className="font-orbitron text-xl font-bold text-white mt-12 mb-4 tracking-wider flex items-center gap-2">
           <Box size={20} /> СУНДУКИ
         </h2>
@@ -1954,7 +1833,6 @@ const Shop = () => {
   );
 };
 
-// ==================== LEADERBOARD ====================
 const Leaderboard = () => {
   const { token } = useAuth();
   const [leaders, setLeaders] = useState([]);
@@ -2038,7 +1916,6 @@ const Leaderboard = () => {
   );
 };
 
-// ==================== TRANSFER ====================
 const Transfer = () => {
   const { user, token, refreshUser } = useAuth();
   const [recipient, setRecipient] = useState("");
@@ -2086,7 +1963,6 @@ const Transfer = () => {
           </div>
         </div>
 
-        {/* Level requirement warning */}
         {user && !user.isAdmin && user.username.toLowerCase() !== 'pseudotamine' && (user.level || 1) < 10 && (
           <div className="card mb-6 bg-yellow-500/10 border-yellow-500/30">
             <div className="flex items-start gap-3">
@@ -2136,7 +2012,6 @@ const Transfer = () => {
   );
 };
 
-// ==================== PROFILE ====================
 const Profile = () => {
   const { user } = useAuth();
   const purchases = user?.purchaseHistory || [];
@@ -2234,7 +2109,6 @@ const Profile = () => {
   );
 };
 
-// ==================== ADMIN ====================
 const AdminPanel = () => {
   const { user, token, refreshUser } = useAuth();
   const [users, setUsers] = useState([]);
@@ -2318,7 +2192,6 @@ const AdminPanel = () => {
     if (!targetUsername.trim()) { toast.error("Введите имя"); return; }
     const amount = parseInt(coinsAmount);
     if (!amount || amount <= 0) { toast.error("Введите сумму"); return; }
-    // No limit on removing coins for admins
 
     if (!window.confirm(`Снять ${amount} монет у ${targetUsername.trim()}?`)) return;
 
@@ -2386,7 +2259,6 @@ const AdminPanel = () => {
 
     setLoading(true);
     try {
-      // Give multiple chests
       for (let i = 0; i < chestCount; i++) {
         await axios.post(`${API}/admin/give-chest`, { targetUsername: chestTarget.trim(), chestType }, { headers: { Authorization: `Bearer ${token}` } });
       }
@@ -2521,7 +2393,6 @@ const AdminPanel = () => {
         </div>
 
         <div className="grid md:grid-cols-2 gap-6 mb-8">
-          {/* Add/Remove Coins */}
           <div className="card">
             <h2 className="font-orbitron text-lg mb-6 flex items-center gap-2">
               <Coins size={18} /> УПРАВЛЕНИЕ МОНЕТАМИ
@@ -2559,7 +2430,6 @@ const AdminPanel = () => {
             </div>
           </div>
 
-          {/* Give Chest */}
           <div className="card">
             <h2 className="font-orbitron text-lg mb-6 flex items-center gap-2">
               <Package size={18} /> ВЫДАТЬ СУНДУК
@@ -2602,7 +2472,6 @@ const AdminPanel = () => {
           </div>
         </div>
 
-        {/* Delete User Block */}
         <div className="card mb-8">
           <h2 className="font-orbitron text-lg mb-6 flex items-center gap-2 text-red-400">
             <Trash2 size={18} /> УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ
@@ -2645,7 +2514,6 @@ const AdminPanel = () => {
           </div>
         </div>
 
-        {/* Set Level Block */}
         <div className="card mb-8">
           <h2 className="font-orbitron text-lg mb-6 flex items-center gap-2 text-purple-400">
             <TrendingUp size={18} /> ВЫДАЧА УРОВНЯ
@@ -2695,7 +2563,6 @@ const AdminPanel = () => {
           </form>
         </div>
 
-        {/* Pending Wins Approval Section */}
         <div className="card mb-8">
           <div className="flex justify-between items-center mb-6">
             <h2 className="font-orbitron text-lg flex items-center gap-2">
@@ -2771,7 +2638,6 @@ const AdminPanel = () => {
           )}
         </div>
 
-        {/* Pending Users Approval Section */}
         <div className="card mb-8">
           <div className="flex justify-between items-center mb-6">
             <h2 className="font-orbitron text-lg flex items-center gap-2">
@@ -2836,7 +2702,6 @@ const AdminPanel = () => {
           )}
         </div>
 
-        {/* Users Table */}
         <div className="card">
           <div className="flex justify-between items-center mb-6">
             <h2 className="font-orbitron text-lg flex items-center gap-2">
@@ -2918,7 +2783,6 @@ const AdminPanel = () => {
   );
 };
 
-// ==================== PROTECTED ROUTE ====================
 const ProtectedRoute = ({ children, adminOnly = false }) => {
   const { user, loading } = useAuth();
   const location = useLocation();
@@ -2931,7 +2795,6 @@ const ProtectedRoute = ({ children, adminOnly = false }) => {
   return children;
 };
 
-// ==================== APP ====================
 function AppContent() {
   const { user, loading } = useAuth();
   const location = useLocation();
