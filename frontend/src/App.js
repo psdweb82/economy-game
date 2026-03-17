@@ -1607,7 +1607,7 @@ const CrashGameInner = () => {
                 result.won === false ? "text-red-400" : 
                 "text-yellow-400"
               }`}>
-                {result.won === true ? "ВЫИГРЫШ!" : result.won === false ? "ПРОИГРЫШ!" : "НИЧЬЯ!"}
+                {result.won === true ? "ВЫИГРЫШ!" : result.won === false ? "ПРОИГРЫШ!" : "ПОЗДРАВЛЯЕМ!"}
               </div>
               <div className="text-white">
                 <div>Выигрыш: {result.betAmount} </div>
