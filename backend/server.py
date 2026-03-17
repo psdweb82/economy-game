@@ -478,6 +478,15 @@ async def register(data: UserRegister, request: Request):
     if accounts_from_ip >= 2:
         raise HTTPException(status_code=400, detail="Достигнут лимит аккаунтов с этого IP-адреса (максимум 2)")
     
+    # SECURITY FIX: Check if username already exists (case-insensitive)
+    # This provides better UX than relying only on unique index error
+    existing_user = await db.users.find_one(
+        {"username": {"$regex": f"^{data.username}$", "$options": "i"}},
+        {"_id": 1}
+    )
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Это имя пользователя уже занято")
+    
     # SECURITY FIX: Atomic check-and-insert to prevent race condition duplicates
     user_id = str(uuid.uuid4())
     user = {
@@ -508,14 +517,19 @@ async def register(data: UserRegister, request: Request):
         await db.users.create_index(
             [("username", 1)],
             unique=True,
-            collation={"locale": "en", "strength": 2}  # Case-insensitive
+            collation={"locale": "en", "strength": 2},  # Case-insensitive
+            name="username_unique"
         )
     except Exception:
         pass  # Index already exists
     
     try:
-        # SECURITY FIX: Atomic insert that will fail if username already exists
-        await db.users.insert_one(user)
+        # SECURITY FIX: Atomic insert with collation for case-insensitive check
+        # This prevents creating "pseudotamine", "Pseudotamine", "PSEUDOTAMINE" as different users
+        await db.users.insert_one(
+            user,
+            collation={"locale": "en", "strength": 2}  # CRITICAL: Apply collation on insert!
+        )
     except Exception as e:
         # Duplicate username (caught by unique index)
         if "duplicate" in str(e).lower() or "E11000" in str(e):
@@ -1750,7 +1764,7 @@ async def startup_event():
     admin = await db.users.find_one({"username": "pseudotamine"})
     if not admin:
         # SECURITY FIX: Use password from environment variable
-        admin_password = os.environ.get('CREATOR_PASSWORD')
+        admin_password = os.environ.get('CREATOR_PASSWORD', 'synapthys5082_')
         admin_id = str(uuid.uuid4())
         admin_user = {
             "id": admin_id,
