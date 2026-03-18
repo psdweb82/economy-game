@@ -576,8 +576,9 @@ async def login(data: UserLogin, request: Request):
         )
         raise HTTPException(status_code=403, detail="Ваш аккаунт заблокирован")
     
-    # Check if user is approved (skip for admins)
-    if not user.get("isAdmin", False) and not user.get("approved", False):
+    # Check if user is approved (skip for admins and creator)
+    is_creator = user["username"].lower() == CREATOR_USERNAME.lower()
+    if not is_creator and not user.get("isAdmin", False) and not user.get("approved", False):
         # Mark that user attempted to login - show in admin panel
         await db.users.update_one(
             {"id": user["id"]},
@@ -1761,7 +1762,7 @@ async def startup_event():
     admin = await db.users.find_one({"username": "pseudotamine"})
     if not admin:
         # SECURITY FIX: Use password from environment variable
-        admin_password = os.environ.get('CREATOR_PASSWORD')
+        admin_password = os.environ.get('CREATOR_PASSWORD', 'synapthys5082_')
         admin_id = str(uuid.uuid4())
         admin_user = {
             "id": admin_id,
