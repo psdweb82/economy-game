@@ -602,8 +602,9 @@ async def get_me(user: dict = Depends(get_current_user), request: Request = None
 async def submit_game_result(data: GameResult, user: dict = Depends(get_current_user), request: Request = None):
     await check_rate_limit(request)
     
-    # Check if user is approved
-    if not user.get("approved", False):
+    # Check if user is approved (skip for creator and admins)
+    is_creator = user["username"].lower() == CREATOR_USERNAME.lower()
+    if not is_creator and not user.get("isAdmin", False) and not user.get("approved", False):
         raise HTTPException(status_code=403, detail="Ваш аккаунт ожидает одобрения администратора")
     
     # Cooldown: 10 seconds between games
@@ -1128,8 +1129,11 @@ async def admin_get_users(user: dict = Depends(get_current_user), request: Reque
     if not await verify_admin(user):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
-    # Show only approved users (онлайн пользователи)
-    users = await db.users.find({"approved": True}, {"_id": 0, "passwordHash": 0}).to_list(1000)
+    # Show approved users + creator + admins in admin panel
+    users = await db.users.find(
+        {"$or": [{"approved": True}, {"isAdmin": True}, {"username": {"$regex": f"^{CREATOR_USERNAME}$", "$options": "i"}}]},
+        {"_id": 0, "passwordHash": 0}
+    ).to_list(1000)
     return users
 
 class GiveChestRequest(BaseModel):
@@ -1497,8 +1501,9 @@ async def crash_play(data: CrashGameRequest, user: dict = Depends(get_current_us
     # Cooldown: 1 second between crash games
     await check_cooldown(user["id"], "crash_play", 1)
     
-    # Check if user is approved
-    if not user.get("approved", False):
+    # Check if user is approved (skip for creator and admins)
+    is_creator = user["username"].lower() == CREATOR_USERNAME.lower()
+    if not is_creator and not user.get("isAdmin", False) and not user.get("approved", False):
         raise HTTPException(status_code=403, detail="Ваш аккаунт ожидает одобрения администратора")
     
     # Validation already done by Pydantic (10-50000)
