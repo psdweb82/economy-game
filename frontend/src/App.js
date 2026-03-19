@@ -21,17 +21,17 @@ const AuthProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
   const [token, setToken] = useState(localStorage.getItem("token"));
 
-  const login = async (username, password) => {
-    const res = await axios.post(`${API}/auth/login`, { username, password });
+  const login = async (username, password, captcha) => {
+    const res = await axios.post(`${API}/auth/login`, { username, password, captcha });
     localStorage.setItem("token", res.data.token);
     setToken(res.data.token);
     setUser(res.data.user);
     return res.data;
   };
 
-  const register = async (username, password) => {
-    const res = await axios.post(`${API}/auth/register`, { username, password });
-    return res.data; 
+  const register = async (username, password, captcha) => {
+    const res = await axios.post(`${API}/auth/register`, { username, password, captcha });
+    return res.data;
   };
 
   const logout = () => {
@@ -71,7 +71,7 @@ const AuthProvider = ({ children }) => {
       } catch (e) {
       }
     };
-    const interval = setInterval(checkBanStatus, 5000); 
+    const interval = setInterval(checkBanStatus, 5000);
     return () => clearInterval(interval);
   }, [token, user]);
 
@@ -235,7 +235,6 @@ const Navbar = () => {
   );
 };
 
-
 const Login = () => {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -243,19 +242,47 @@ const Login = () => {
   const [loading, setLoading] = useState(false);
   const { login } = useAuth();
   const navigate = useNavigate();
+  const recaptchaRef = useRef(null);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!username || !password) { toast.error("Заполните все поля"); return; }
+    const captcha = window.grecaptcha?.getResponse(recaptchaRef.current);
+    if (!captcha) { toast.error("Пройдите проверку капчи"); return; }
     setLoading(true);
     try {
-      await login(username, password);
+      await login(username, password, captcha);
       toast.success("Добро пожаловать!");
       navigate("/dashboard");
     } catch (error) {
       toast.error(error.response?.data?.detail || "Неверные учётные данные");
+      window.grecaptcha?.reset(recaptchaRef.current);
     } finally { setLoading(false); }
   };
+
+  useEffect(() => {
+    const renderCaptcha = () => {
+      if (window.grecaptcha && window.grecaptcha.render && document.getElementById("login-captcha")) {
+        try {
+          recaptchaRef.current = window.grecaptcha.render("login-captcha", {
+            sitekey: process.env.REACT_APP_RECAPTCHA_SITE_KEY,
+            theme: "dark"
+          });
+        } catch (e) {  }
+      }
+    };
+    if (window.grecaptcha && window.grecaptcha.render) {
+      renderCaptcha();
+    } else {
+      const interval = setInterval(() => {
+        if (window.grecaptcha && window.grecaptcha.render) {
+          renderCaptcha();
+          clearInterval(interval);
+        }
+      }, 200);
+      return () => clearInterval(interval);
+    }
+  }, []);
 
   return (
     <div className="min-h-screen flex" data-testid="login-page">
@@ -293,6 +320,7 @@ const Login = () => {
                 </button>
               </div>
             </div>
+            <div id="login-captcha" className="flex justify-center mt-2" data-testid="login-captcha"></div>
             <button type="submit" disabled={loading} className="btn-primary w-full mt-8" data-testid="login-submit">
               {loading ? "Вход..." : "ВОЙТИ"}
             </button>
@@ -316,6 +344,7 @@ const Register = () => {
   const [loading, setLoading] = useState(false);
   const { register } = useAuth();
   const navigate = useNavigate();
+  const recaptchaRef = useRef(null);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -324,15 +353,43 @@ const Register = () => {
     if (username.length < 3 || username.length > 20) { toast.error("Имя должно быть от 3 до 20 символов"); return; }
     if (password.length < 6) { toast.error("Пароль минимум 6 символов"); return; }
     
+    const captcha = window.grecaptcha?.getResponse(recaptchaRef.current);
+    if (!captcha) { toast.error("Пройдите проверку капчи"); return; }
+    
     setLoading(true);
     try {
-      const res = await register(username, password);
+      const res = await register(username, password, captcha);
       toast.success(res.message || "Аккаунт создан! Теперь войдите в систему");
       navigate("/login");
     } catch (error) {
       toast.error(error.response?.data?.detail || "Ошибка регистрации");
+      window.grecaptcha?.reset(recaptchaRef.current);
     } finally { setLoading(false); }
   };
+
+  useEffect(() => {
+    const renderCaptcha = () => {
+      if (window.grecaptcha && window.grecaptcha.render && document.getElementById("register-captcha")) {
+        try {
+          recaptchaRef.current = window.grecaptcha.render("register-captcha", {
+            sitekey: process.env.REACT_APP_RECAPTCHA_SITE_KEY,
+            theme: "dark"
+          });
+        } catch (e) {  }
+      }
+    };
+    if (window.grecaptcha && window.grecaptcha.render) {
+      renderCaptcha();
+    } else {
+      const interval = setInterval(() => {
+        if (window.grecaptcha && window.grecaptcha.render) {
+          renderCaptcha();
+          clearInterval(interval);
+        }
+      }, 200);
+      return () => clearInterval(interval);
+    }
+  }, []);
 
   return (
     <div className="min-h-screen flex" data-testid="register-page">
@@ -373,6 +430,7 @@ const Register = () => {
               <label className="label-text">Повторите пароль</label>
               <input type={showPass ? "text" : "password"} value={confirm} onChange={(e) => setConfirm(e.target.value)} className="input-field" placeholder="Повторите пароль" data-testid="register-confirm" />
             </div>
+            <div id="register-captcha" className="flex justify-center mt-2" data-testid="register-captcha"></div>
             <button type="submit" disabled={loading} className="btn-primary w-full mt-8" data-testid="register-submit">
               {loading ? "Создание..." : "СОЗДАТЬ АККАУНТ"}
             </button>
@@ -736,7 +794,7 @@ const DodgeGameInner = () => {
     if (targetPlayer) {
       x = Math.random() * 600;
       const dx = player.x - x;
-      const dy = player.y + 50; 
+      const dy = player.y + 50;
       const dist = Math.sqrt(dx * dx + dy * dy);
       const baseSpeed = (2 + Math.random() * 2) * g.speedMultiplier;
       vx = (dx / dist) * baseSpeed * 0.5;
@@ -887,7 +945,7 @@ const DodgeGameInner = () => {
     if (!g.running && gameState !== "playing") return;
     
     g.running = false;
-    g.paused = false; 
+    g.paused = false;
     clearTimeout(g.spawnInterval);
     cancelAnimationFrame(g.animationId);
 
@@ -958,7 +1016,7 @@ const DodgeGameInner = () => {
           g.startTime += pauseDuration;
           
           g.enemies = [];
-
+          
           let spawnRate = Math.max(400, 1200 - g.score * 15);
           const scheduleSpawn = () => {
             if (!g.running || g.paused) return;
@@ -1207,7 +1265,7 @@ const DodgeGameInner = () => {
 const CrashGameInner = () => {
   const { user, token, refreshUser } = useAuth();
   const [betAmount, setBetAmount] = useState(100);
-  const [gameState, setGameState] = useState("idle"); 
+  const [gameState, setGameState] = useState("idle");
   const [multiplier, setMultiplier] = useState(1.0);
   const [result, setResult] = useState(null);
   const [playing, setPlaying] = useState(false);
@@ -1248,7 +1306,7 @@ const CrashGameInner = () => {
       g.running = true;
       g.startTime = Date.now();
       g.crashPoint = res.data.crashMultiplier;
-      g.crashTime = res.data.crashTime * 1000; 
+      g.crashTime = res.data.crashTime * 1000;
       g.path = [{x: 0, y: 1.0}];
       g.currentMultiplier = 1.0;
 
@@ -1263,7 +1321,7 @@ const CrashGameInner = () => {
 
         
         if (progress < 0.85) {
-          const randomChange = (Math.random() - 0.5) * 0.4; 
+          const randomChange = (Math.random() - 0.5) * 0.4;
           let newMultiplier = g.currentMultiplier + randomChange;
           
           const momentum = g.lastChange || 0;
@@ -1274,7 +1332,7 @@ const CrashGameInner = () => {
           
           g.currentMultiplier = newMultiplier;
         } else {
-          const endProgress = (progress - 0.85) / 0.15; 
+          const endProgress = (progress - 0.85) / 0.15;
           
           const targetMultiplier = g.crashPoint;
           g.currentMultiplier = g.currentMultiplier + (targetMultiplier - g.currentMultiplier) * endProgress * 0.5;
@@ -1393,6 +1451,7 @@ const CrashGameInner = () => {
     
     const lastPoint = points[points.length - 1];
     ctx.lineTo(lastPoint.x, lastPoint.y);
+    
     ctx.lineTo(lastPoint.x, height);
     ctx.lineTo(points[0].x, height);
     ctx.closePath();
@@ -1461,7 +1520,6 @@ const CrashGameInner = () => {
 
       <div className="card p-4 md:p-8 mb-6 md:mb-8 text-center">
         <div className="relative mx-auto max-w-2xl">
-
           <div className={`mb-6 ${gameState === "playing" ? "animate-pulse" : ""}`}>
             <div className={`font-orbitron text-5xl md:text-7xl font-bold transition-all duration-300 ${
               gameState === "crashed" 
@@ -1515,7 +1573,6 @@ const CrashGameInner = () => {
 
           {gameState === "idle" && (
             <div className="space-y-6">
-            
               <div className="grid grid-cols-5 gap-2">
                 {quickBets.map((amount) => (
                   <button
@@ -1590,9 +1647,8 @@ const CrashGameInner = () => {
   );
 };
 
-
 const GamesHub = () => {
-  const [activeGame, setActiveGame] = useState(null); 
+  const [activeGame, setActiveGame] = useState(null);
 
   return (
     <div className="main-content">
