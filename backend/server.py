@@ -15,52 +15,73 @@ import jwt
 import random
 from collections import defaultdict
 import asyncio
+import httpx
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# JWT Settings - SECURITY FIX: No fallback in production
 JWT_SECRET = os.environ.get('JWT_SECRET')
 if not JWT_SECRET:
-    # Allow fallback only for local development
     if os.environ.get('ENVIRONMENT') == 'production':
         raise RuntimeError("JWT_SECRET must be set in production environment")
-    JWT_SECRET = 'sukunaW_secret_key_2026'  # Local dev only
+    JWT_SECRET = 'sukunaW_secret_key_2026'
     
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 168
+
+RECAPTCHA_SECRET = os.environ.get('RECAPTCHA_SECRET')
+if not RECAPTCHA_SECRET:
+    logger.warning("RECAPTCHA_SECRET not set - captcha verification will be skipped in dev mode")
+
+async def verify_captcha(captcha_token: str):
+    """Verify reCAPTCHA v2 token with Google"""
+    if not RECAPTCHA_SECRET:
+        return True
+    if not captcha_token:
+        raise HTTPException(status_code=400, detail="Капча обязательна")
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client_http:
+            response = await client_http.post(
+                "https://www.google.com/recaptcha/api/siteverify",
+                data={"secret": RECAPTCHA_SECRET, "response": captcha_token}
+            )
+            result = response.json()
+            if not result.get("success"):
+                logger.warning(f"reCAPTCHA verification failed: {result.get('error-codes', [])}")
+                raise HTTPException(status_code=400, detail="Проверка капчи не пройдена")
+            return True
+    except httpx.TimeoutException:
+        logger.error("reCAPTCHA verification timeout")
+        raise HTTPException(status_code=503, detail="Сервис проверки капчи недоступен, попробуйте позже")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"reCAPTCHA verification error: {type(e).__name__}")
+        raise HTTPException(status_code=503, detail="Ошибка проверки капчи, попробуйте позже")
 
 security = HTTPBearer()
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
-# ==================== RATE LIMITING ====================
-# Rate limiter with IP + username tracking
 rate_limit_store = defaultdict(list)
-RATE_LIMIT_REQUESTS = 40  # Max requests for general endpoints
-RATE_LIMIT_WINDOW = 10  # Time window in seconds
+RATE_LIMIT_REQUESTS = 40
+RATE_LIMIT_WINDOW = 10
 
-# SECURITY: Stricter limits for auth endpoints
-AUTH_RATE_LIMIT_REGISTER = 3  # Max 3 registrations per minute per IP
-AUTH_RATE_LIMIT_LOGIN = 5     # Max 5 login attempts per minute per IP
-AUTH_RATE_LIMIT_WINDOW = 60   # 1 minute window
+AUTH_RATE_LIMIT_REGISTER = 3
+AUTH_RATE_LIMIT_LOGIN = 5
+AUTH_RATE_LIMIT_WINDOW = 60
 
-# SECURITY FIX: Additional username-based rate limiting (anti-proxy protection)
-USERNAME_RATE_LIMIT_LOGIN = 5      # Max 5 attempts per minute per username (from ANY IP)
-USERNAME_RATE_LIMIT_REGISTER = 3   # Max 3 registrations per minute per similar username pattern
+USERNAME_RATE_LIMIT_LOGIN = 5
+USERNAME_RATE_LIMIT_REGISTER = 3
 
-# Track failed login attempts in MongoDB (persistent across restarts)
-MAX_FAILED_LOGINS_IP = 5       # Max failed attempts per IP before lockout
-# SECURITY FIX: Progressive delay instead of blocking username (prevents DoS)
-# After N attempts: 1s, 2s, 5s, 10s, 30s, 60s delay
-PROGRESSIVE_DELAYS = [0, 0, 1, 2, 5, 10, 30, 60, 120]  # seconds
-FAILED_LOGIN_LOCKOUT = 300     # 5 minutes for IP lockout (keep history)
+MAX_FAILED_LOGINS_IP = 5
+PROGRESSIVE_DELAYS = [0, 0, 1, 2, 5, 10, 30, 60, 120]
+FAILED_LOGIN_LOCKOUT = 300
 
 async def check_rate_limit(request: Request, endpoint_type: str = "general", username: str = None):
     """
@@ -71,24 +92,18 @@ async def check_rate_limit(request: Request, endpoint_type: str = "general", use
     - register: 3 requests per minute per IP + username pattern check
     - login: 5 requests per minute per IP + 5 per minute per username (ANY IP)
     """
-    # Get real IP from X-Forwarded-For header (Kubernetes/nginx proxy)
     forwarded_for = request.headers.get("x-forwarded-for")
     client_ip = forwarded_for.split(",")[0].strip() if forwarded_for else request.client.host
     
-    # Get user agent for basic bot detection (ADDITIONAL, not primary)
     user_agent = request.headers.get("user-agent", "").lower()
     
-    # SECURITY: Block suspicious user agents (ADDITIONAL protection, easily bypassed)
     suspicious_agents = ["bot", "crawler", "spider", "scraper"]
     if any(agent in user_agent for agent in suspicious_agents):
-        # Allow legitimate bots but log suspicious activity
         if "googlebot" not in user_agent and "bingbot" not in user_agent:
             logger.warning(f"Suspicious user agent from {client_ip}: {user_agent}")
-            # Don't block, just log (can be easily bypassed)
     
     now = datetime.now(timezone.utc).timestamp()
     
-    # Determine limits based on endpoint type
     if endpoint_type == "register":
         max_requests = AUTH_RATE_LIMIT_REGISTER
         window = AUTH_RATE_LIMIT_WINDOW
@@ -102,7 +117,6 @@ async def check_rate_limit(request: Request, endpoint_type: str = "general", use
         window = RATE_LIMIT_WINDOW
         store_key = client_ip
     
-    # Check IP-based rate limit
     rate_limit_store[store_key] = [
         ts for ts in rate_limit_store[store_key]
         if now - ts < window
@@ -117,17 +131,14 @@ async def check_rate_limit(request: Request, endpoint_type: str = "general", use
     
     rate_limit_store[store_key].append(now)
     
-    # SECURITY FIX: Additional username-based rate limiting (ANTI-PROXY)
     if username and endpoint_type in ["login", "register"]:
         username_key = f"username_{username.lower()}_{endpoint_type}"
         
-        # Clean old timestamps for this username
         rate_limit_store[username_key] = [
             ts for ts in rate_limit_store[username_key]
             if now - ts < AUTH_RATE_LIMIT_WINDOW
         ]
         
-        # Check username-based limit
         username_limit = USERNAME_RATE_LIMIT_LOGIN if endpoint_type == "login" else USERNAME_RATE_LIMIT_REGISTER
         
         if len(rate_limit_store[username_key]) >= username_limit:
@@ -150,7 +161,6 @@ async def check_failed_login_attempts(client_ip: str, username: str):
     now = datetime.now(timezone.utc)
     lockout_threshold = now - timedelta(seconds=FAILED_LOGIN_LOCKOUT)
     
-    # Check IP-based lockout (hard block)
     ip_attempts = await db.failed_logins.count_documents({
         "ip": client_ip,
         "timestamp": {"$gte": lockout_threshold}
@@ -162,21 +172,16 @@ async def check_failed_login_attempts(client_ip: str, username: str):
             detail=f"Слишком много неудачных попыток с этого IP. Подождите {FAILED_LOGIN_LOCKOUT // 60} мин."
         )
     
-    # SECURITY FIX: Progressive delay for username (ANTI-DoS)
-    # Instead of blocking username completely (DoS vulnerability),
-    # we introduce increasing delays
     username_attempts = await db.failed_logins.count_documents({
         "username": username.lower(),
         "timestamp": {"$gte": lockout_threshold}
     })
     
     if username_attempts > 0:
-        # Calculate progressive delay
         delay_index = min(username_attempts, len(PROGRESSIVE_DELAYS) - 1)
         required_delay = PROGRESSIVE_DELAYS[delay_index]
         
         if required_delay > 0:
-            # Check if last attempt was recent enough to require delay
             last_attempt = await db.failed_logins.find_one(
                 {"username": username.lower()},
                 sort=[("timestamp", -1)]
@@ -188,7 +193,6 @@ async def check_failed_login_attempts(client_ip: str, username: str):
                 if time_since_last < required_delay:
                     remaining_delay = int(required_delay - time_since_last)
                     
-                    # Log suspicious activity (potential attack)
                     if username_attempts >= 5:
                         logger.warning(
                             f"Suspicious login activity for username '{username}': "
@@ -207,7 +211,6 @@ async def record_failed_login(client_ip: str, username: str):
     """
     now = datetime.now(timezone.utc)
     
-    # Record in MongoDB (will be auto-deleted by TTL index after 1 hour)
     await db.failed_logins.insert_one({
         "ip": client_ip,
         "username": username.lower(),
@@ -219,10 +222,8 @@ async def clear_failed_login_attempts(client_ip: str, username: str):
     """
     Clear failed login attempts after successful login (from MongoDB)
     """
-    # Clear attempts for this IP
     await db.failed_logins.delete_many({"ip": client_ip})
     
-    # Clear attempts for this username
     await db.failed_logins.delete_many({"username": username.lower()})
 
 def detect_suspicious_username_pattern(username: str) -> bool:
@@ -234,22 +235,18 @@ def detect_suspicious_username_pattern(username: str) -> bool:
     """
     username_lower = username.lower()
     
-    # Pattern 1: Ends with number (test1, user123)
     import re
     if re.match(r'^[a-z]+\d+$', username_lower):
-        # Check if base name is generic
         base_name = re.sub(r'\d+$', '', username_lower)
         generic_names = ['test', 'user', 'bot', 'fake', 'temp', 'demo', 'sample', 'example']
         if base_name in generic_names:
             return True
     
-    # Pattern 2: Ends with underscore/dash + number (bot_1, user-123)
     if re.match(r'^[a-z]+[_-]\d+$', username_lower):
         base_name = re.sub(r'[_-]\d+$', '', username_lower)
         if base_name in ['test', 'user', 'bot', 'fake', 'temp']:
             return True
     
-    # Pattern 3: All numbers or very short (1, 12, 123)
     if username_lower.isdigit() and len(username_lower) <= 4:
         return True
     
@@ -259,39 +256,37 @@ async def check_mass_registration_pattern(username: str, client_ip: str):
     """
     Check for mass registration patterns from same IP
     """
-    # Check if similar usernames were registered from this IP recently
     one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
     
-    # Extract base pattern (e.g., "test" from "test123")
     import re
     base_pattern = re.sub(r'\d+$', '', username.lower())
     base_pattern = re.sub(r'[_-]\d+$', '', base_pattern)
     
-    # Count similar registrations from this IP
     similar_count = await db.users.count_documents({
         "registrationIP": client_ip,
         "createdAt": {"$gte": one_hour_ago.isoformat()},
         "username": {"$regex": f"^{base_pattern}", "$options": "i"}
     })
     
-    if similar_count >= 2:  # Already 2 similar usernames from this IP
+    if similar_count >= 2:
         raise HTTPException(
             status_code=400,
             detail="Обнаружена подозрительная активность. Регистрация временно недоступна"
         )
 
-# ==================== MODELS WITH VALIDATION ====================
 class UserRegister(BaseModel):
     username: str
     password: str
+    captcha: str = ""
 
 class UserLogin(BaseModel):
     username: str
     password: str
+    captcha: str = ""
 
 class GameResult(BaseModel):
-    score: int = Field(ge=0, le=3000)  # Max 3000 score
-    timePlayedSeconds: int = Field(ge=0, le=600)  # Max 10 minutes
+    score: int = Field(ge=0, le=3000)
+    timePlayedSeconds: int = Field(ge=0, le=600)
 
 class PurchaseRequest(BaseModel):
     itemType: str
@@ -299,18 +294,18 @@ class PurchaseRequest(BaseModel):
 
 class TransferRequest(BaseModel):
     toUsername: str
-    amount: int = Field(gt=0, le=50000)  # SECURITY: Must be positive, max 50000
+    amount: int = Field(gt=0, le=50000)
 
 class AdminAddCoins(BaseModel):
     targetUsername: str
-    amount: int = Field(gt=0, le=100000)  # SECURITY: Must be positive
+    amount: int = Field(gt=0, le=100000)
 
 class AdminDeleteUser(BaseModel):
     targetUsername: str
 
 class AdminSetLevel(BaseModel):
     targetUsername: str
-    level: int = Field(ge=1, le=100)  # SECURITY: Level must be 1-100
+    level: int = Field(ge=1, le=100)
 
 class BonusRequest(BaseModel):
     bonusType: str
@@ -318,7 +313,6 @@ class BonusRequest(BaseModel):
 class ChestRequest(BaseModel):
     chestId: str
 
-# ==================== HELPERS ====================
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
@@ -348,7 +342,6 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     
-    # Check if user is banned
     if user.get("isBanned"):
         raise HTTPException(status_code=403, detail="Ваш аккаунт заблокирован")
     
@@ -379,9 +372,8 @@ async def check_suspicious_activity(user_id: str, old_coins: int, new_coins: int
     
     PROTECTION: Creator (pseudotamine) is immune to auto-ban
     """
-    # SECURITY FIX: Never ban creator
     if username and username.lower() == "pseudotamine":
-        return  # Creator is immune to auto-ban
+        return
     
     coins_gain = new_coins - old_coins
     xp_gain = new_xp - old_xp
@@ -390,7 +382,6 @@ async def check_suspicious_activity(user_id: str, old_coins: int, new_coins: int
     suspicious = False
     reason = ""
     
-    # Check for excessive gains (skip if from admin)
     if not from_admin:
         if coins_gain > 5000:
             suspicious = True
@@ -402,13 +393,11 @@ async def check_suspicious_activity(user_id: str, old_coins: int, new_coins: int
             suspicious = True
             reason = f"Подозрительный прыжок уровня: +{level_jump}"
     
-    # Always check negative balance
     if new_coins < 0 or new_xp < 0:
         suspicious = True
         reason = f"Отрицательный баланс (coins: {new_coins}, xp: {new_xp})"
     
     if suspicious:
-        # BAN user (do NOT delete)
         await db.users.update_one(
             {"id": user_id},
             {"$set": {"isBanned": True}}
@@ -419,7 +408,6 @@ async def check_suspicious_activity(user_id: str, old_coins: int, new_coins: int
             detail=f"Ваш аккаунт заблокирован"
         )
 
-# Cooldown tracking: {user_id: {action: timestamp}}
 cooldown_store = defaultdict(dict)
 
 async def check_cooldown(user_id: str, action: str, cooldown_seconds: int):
@@ -436,31 +424,25 @@ async def check_cooldown(user_id: str, action: str, cooldown_seconds: int):
     
     cooldown_store[user_id][action] = now
 
-# ==================== AUTH ROUTES ====================
 @api_router.post("/auth/register")
 async def register(data: UserRegister, request: Request):
-    # SECURITY: Strict rate limiting for registration (3 per minute per IP + username)
     await check_rate_limit(request, endpoint_type="register", username=data.username)
     
-    # ANTI-DUPE: Get real client IP from X-Forwarded-For header (Kubernetes/nginx proxy)
+    await verify_captcha(data.captcha)
+    
     forwarded_for = request.headers.get("x-forwarded-for")
     client_ip = forwarded_for.split(",")[0].strip() if forwarded_for else request.client.host
     
-    # Input validation
     if len(data.username) < 3 or len(data.username) > 20:
         raise HTTPException(status_code=400, detail="Имя пользователя должно быть от 3 до 20 символов")
     if len(data.password) < 6:
         raise HTTPException(status_code=400, detail="Пароль должен быть не менее 6 символов")
     
-    # SECURITY: Check for suspicious username patterns (ADDITIONAL, not critical)
     if detect_suspicious_username_pattern(data.username):
         logger.warning(f"Suspicious username pattern detected: {data.username} from {client_ip}")
-        # Don't block - just log (easily bypassed, not primary defense)
     
-    # SECURITY FIX: Check for mass registration patterns from same IP
     await check_mass_registration_pattern(data.username, client_ip)
     
-    # Check cooldown: 1 hour between registrations from same IP
     one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
     recent_registration = await db.users.find_one({
         "registrationIP": client_ip,
@@ -473,13 +455,10 @@ async def register(data: UserRegister, request: Request):
             detail="Подождите 1 час перед следующей регистрацией"
         )
     
-    # Check total accounts from this IP (strict limit: max 2 accounts ever)
     accounts_from_ip = await db.users.count_documents({"registrationIP": client_ip})
     if accounts_from_ip >= 2:
         raise HTTPException(status_code=400, detail="Достигнут лимит аккаунтов с этого IP-адреса (максимум 2)")
     
-    # SECURITY FIX: Check if username already exists (case-insensitive)
-    # This provides better UX than relying only on unique index error
     existing_user = await db.users.find_one(
         {"username": {"$regex": f"^{data.username}$", "$options": "i"}},
         {"_id": 1}
@@ -487,13 +466,11 @@ async def register(data: UserRegister, request: Request):
     if existing_user:
         raise HTTPException(status_code=400, detail="Это имя пользователя уже занято")
     
-    # SECURITY FIX: Atomic check-and-insert to prevent race condition duplicates
     user_id = str(uuid.uuid4())
     user = {
         "id": user_id,
         "username": data.username,
         "passwordHash": hash_password(data.password),
-        # NO coins, xp, level until approved
         "roles": [],
         "roleGradients": [],
         "clan": None,
@@ -501,8 +478,8 @@ async def register(data: UserRegister, request: Request):
         "purchaseHistory": [],
         "isAdmin": False,
         "isBanned": False,
-        "approved": False,  # Requires admin approval
-        "loginAttempted": False,  # Track login attempts
+        "approved": False,
+        "loginAttempted": False,
         "lastGameTime": None,
         "lastDailyBonus": None,
         "lastWeeklyBonus": None,
@@ -512,81 +489,64 @@ async def register(data: UserRegister, request: Request):
     }
     
     try:
-        # SECURITY FIX: Create unique index on username (case-insensitive) to prevent duplicates
-        # This will be created on first run and prevent any race condition duplicates
         await db.users.create_index(
             [("username", 1)],
             unique=True,
-            collation={"locale": "en", "strength": 2},  # Case-insensitive
+            collation={"locale": "en", "strength": 2},
             name="username_unique"
         )
     except Exception:
-        pass  # Index already exists
+        pass
     
     try:
-        # SECURITY FIX: Atomic insert with collation for case-insensitive check
-        # This prevents creating "pseudotamine", "Pseudotamine", "PSEUDOTAMINE" as different users
         await db.users.insert_one(user)
     except Exception as e:
-        # Duplicate username (caught by unique index)
         if "duplicate" in str(e).lower() or "E11000" in str(e):
             raise HTTPException(status_code=400, detail="Это имя пользователя уже занято")
         raise
     
-    # DO NOT return token - user must login manually
     return {"success": True, "message": "Аккаунт создан! Теперь войдите в систему", "username": data.username}
 
 @api_router.post("/auth/login")
 async def login(data: UserLogin, request: Request):
-    # SECURITY: Strict rate limiting for login (5 per minute per IP + username)
     await check_rate_limit(request, endpoint_type="login", username=data.username)
     
-    # Get client IP
+    await verify_captcha(data.captcha)
+    
     forwarded_for = request.headers.get("x-forwarded-for")
     client_ip = forwarded_for.split(",")[0].strip() if forwarded_for else request.client.host
     
-    # SECURITY FIX: Check for too many failed login attempts (IP + USERNAME)
     await check_failed_login_attempts(client_ip, data.username)
     
     user = await db.users.find_one({"username": {"$regex": f"^{data.username}$", "$options": "i"}}, {"_id": 0})
     
-    # SECURITY: Always check password even if user doesn't exist (timing attack prevention)
     if not user:
-        # Still hash the password to maintain constant timing
         hash_password("dummy_password_to_maintain_timing")
-        # Record failed attempt (IP + username)
         await record_failed_login(client_ip, data.username)
         raise HTTPException(status_code=401, detail="Неверные учётные данные")
     
     if not verify_password(data.password, user["passwordHash"]):
-        # Record failed attempt (IP + username)
         await record_failed_login(client_ip, data.username)
         raise HTTPException(status_code=401, detail="Неверные учётные данные")
     
-    # Check if user is banned
     if user.get("isBanned"):
         raise HTTPException(status_code=403, detail="Ваш аккаунт заблокирован")
     
-    # ENHANCED SECURITY: Check for negative balance before login
     if user.get("coins", 0) < 0 or user.get("xp", 0) < 0:
-        # BAN user (do NOT delete)
         await db.users.update_one(
             {"id": user["id"]},
             {"$set": {"isBanned": True}}
         )
         raise HTTPException(status_code=403, detail="Ваш аккаунт заблокирован")
     
-    # Check if user is approved (skip for admins and creator)
     is_creator = user["username"].lower() == CREATOR_USERNAME.lower()
     if not is_creator and not user.get("isAdmin", False) and not user.get("approved", False):
-        # Mark that user attempted to login - show in admin panel
         await db.users.update_one(
             {"id": user["id"]},
             {"$set": {"loginAttempted": True}}
         )
         raise HTTPException(status_code=403, detail="Ваш аккаунт ожидает одобрения администратора")
     
-    # SECURITY FIX: Clear failed login attempts after successful login (IP + username)
     await clear_failed_login_attempts(client_ip, user["username"])
     
     token = create_token(user["id"], user["username"], user.get("isAdmin", False))
@@ -597,17 +557,14 @@ async def login(data: UserLogin, request: Request):
 async def get_me(user: dict = Depends(get_current_user), request: Request = None):
     return {k: v for k, v in user.items() if k != "passwordHash"}
 
-# ==================== GAME ROUTES ====================
 @api_router.post("/game/submit")
 async def submit_game_result(data: GameResult, user: dict = Depends(get_current_user), request: Request = None):
     await check_rate_limit(request)
     
-    # Check if user is approved (skip for creator and admins)
     is_creator = user["username"].lower() == CREATOR_USERNAME.lower()
     if not is_creator and not user.get("isAdmin", False) and not user.get("approved", False):
         raise HTTPException(status_code=403, detail="Ваш аккаунт ожидает одобрения администратора")
     
-    # Cooldown: 10 seconds between games
     await check_cooldown(user["id"], "game_submit", 10)
     
     max_possible_score = data.timePlayedSeconds * 5
@@ -616,27 +573,19 @@ async def submit_game_result(data: GameResult, user: dict = Depends(get_current_
     if data.timePlayedSeconds > 600:
         raise HTTPException(status_code=400, detail="Недопустимая продолжительность игры")
     
-    # UPDATED DODGE ARENA REWARDS: More generous reward system
     score = data.score
     if score >= 100:
-        # Score 100+: 70-90 coins
         coins_earned = min(70 + (score - 100) // 5, 90)
     elif score >= 50:
-        # Score 50-99: 25-40 coins
         coins_earned = min(25 + (score - 50) // 3, 40)
     elif score >= 20:
-        # Score 20-49: 10-24 coins
         coins_earned = 10 + (score - 20) // 3
     else:
-        # Score 0-19: Minimum 3-9 coins
         coins_earned = max(3, score // 3)
     
-    # XP earned with more generous formula
     xp_earned = data.score // 3 + data.timePlayedSeconds * 2
     
-    # Check if win needs admin approval (>200 coins OR >200 XP)
     if coins_earned > 200 or xp_earned > 200:
-        # Create pending win for admin approval
         pending_win = {
             "id": str(uuid.uuid4()),
             "userId": user["id"],
@@ -658,15 +607,13 @@ async def submit_game_result(data: GameResult, user: dict = Depends(get_current_
             "xpEarned": xp_earned
         }
     
-    # SECURITY FIX: Atomic operation with race condition protection
     now = datetime.now(timezone.utc)
     
-    # Get fresh user data and update atomically
     updated_user = await db.users.find_one_and_update(
         {
             "id": user["id"],
-            "coins": {"$gte": 0},  # Ensure coins never go negative
-            "xp": {"$gte": 0}  # Ensure xp never go negative
+            "coins": {"$gte": 0},
+            "xp": {"$gte": 0}
         },
         {
             "$inc": {
@@ -683,25 +630,21 @@ async def submit_game_result(data: GameResult, user: dict = Depends(get_current_
     if not updated_user:
         raise HTTPException(status_code=400, detail="Ошибка обновления данных")
     
-    # Calculate new level from XP (SECURITY: Level always calculated from XP)
     new_xp = updated_user["xp"]
     new_level = calculate_level(new_xp)
     new_coins = updated_user["coins"]
     
-    # Update level if changed
     if new_level != updated_user.get("level", 1):
         await db.users.update_one(
             {"id": user["id"]},
             {"$set": {"level": new_level}}
         )
     
-    # ANTI-CHEAT: Check for suspicious gains
     old_coins = user.get("coins", 0)
     old_xp = user.get("xp", 0)
     old_level = user.get("level", 1)
     await check_suspicious_activity(user["id"], old_coins, new_coins, old_xp, new_xp, old_level, new_level, from_admin=False, username=user.get("username"))
     
-    # Random chest drop (10% chance if score > 30)
     chest_dropped = None
     if data.score > 30 and random.random() < 0.1:
         chest_types = ['common', 'rare', 'epic']
@@ -734,7 +677,6 @@ async def submit_game_result(data: GameResult, user: dict = Depends(get_current_
         "chestDropped": chest_dropped
     }
 
-# ==================== SHOP ROUTES ====================
 SHOP_ITEMS = {
     "custom_role": {"price": 20000, "name": "Кастомная роль"},
     "custom_gradient": {"price": 25000, "name": "Градиент для роли"},
@@ -756,8 +698,6 @@ async def purchase_item(data: PurchaseRequest, user: dict = Depends(get_current_
     item = SHOP_ITEMS[data.itemType]
     price = item["price"]
     
-    # SECURITY FIX: Atomic operation to prevent race condition
-    # Build additional updates based on item type
     additional_updates = {}
     
     if data.itemType == "custom_role":
@@ -765,13 +705,11 @@ async def purchase_item(data: PurchaseRequest, user: dict = Depends(get_current_
             raise HTTPException(status_code=400, detail="Введите название роли")
         if len(data.itemName) > 20:
             raise HTTPException(status_code=400, detail="Название роли не более 20 символов")
-        # Will push to roles array
     elif data.itemType == "custom_gradient":
         if not data.itemName:
             raise HTTPException(status_code=400, detail="Введите название градиента")
         if len(data.itemName) > 20:
             raise HTTPException(status_code=400, detail="Название градиента не более 20 символов")
-        # Will push to roleGradients array
     elif data.itemType == "create_clan":
         if user.get("clan"):
             raise HTTPException(status_code=400, detail="У вас уже есть клан")
@@ -787,25 +725,22 @@ async def purchase_item(data: PurchaseRequest, user: dict = Depends(get_current_
             raise HTTPException(status_code=400, detail="У вас уже есть категория")
         additional_updates["clanCategory"] = True
     
-    # Atomic purchase with race condition protection
     update_operation = {
-        "$inc": {"coins": -price}  # SECURITY: Atomic decrement
+        "$inc": {"coins": -price}
     }
     
     if additional_updates:
         update_operation["$set"] = additional_updates
     
-    # Add to arrays if needed
     if data.itemType == "custom_role":
         update_operation["$push"] = {"roles": data.itemName}
     elif data.itemType == "custom_gradient":
         update_operation["$push"] = {"roleGradients": data.itemName}
     
-    # Atomic update with condition check
     updated_user = await db.users.find_one_and_update(
         {
             "id": user["id"],
-            "coins": {"$gte": price}  # SECURITY: Ensure user has enough coins
+            "coins": {"$gte": price}
         },
         update_operation,
         return_document=True
@@ -823,7 +758,6 @@ async def purchase_item(data: PurchaseRequest, user: dict = Depends(get_current_
         "time": now.strftime("%H:%M")
     }
     
-    # Add purchase record
     await db.users.update_one(
         {"id": user["id"]},
         {"$push": {"purchaseHistory": purchase_record}}
@@ -831,21 +765,16 @@ async def purchase_item(data: PurchaseRequest, user: dict = Depends(get_current_
     
     return {"success": True, "purchase": purchase_record, "newBalance": updated_user["coins"]}
 
-# ==================== TRANSFER ROUTES ====================
 @api_router.post("/transfer")
 async def transfer_coins(data: TransferRequest, user: dict = Depends(get_current_user), request: Request = None):
     await check_rate_limit(request)
     
-    # Cooldown: 2 seconds between transfers
     await check_cooldown(user["id"], "transfer", 2)
     
-    # Validation is already done by Pydantic Field constraints
-    # amount must be > 0 and <= 50000
     
     if data.toUsername.lower() == user["username"].lower():
         raise HTTPException(status_code=400, detail="Нельзя отправить монеты себе")
     
-    # Level requirement: Must be level 10+ to transfer (except admins and creator)
     is_creator = user["username"].lower() == "pseudotamine"
     is_admin = user.get("isAdmin", False)
     user_level = user.get("level", 1)
@@ -860,12 +789,10 @@ async def transfer_coins(data: TransferRequest, user: dict = Depends(get_current
     if not recipient:
         raise HTTPException(status_code=404, detail="Получатель не найден")
     
-    # SECURITY FIX: Atomic transfer with race condition protection
-    # First, deduct from sender
     sender_result = await db.users.find_one_and_update(
         {
             "id": user["id"],
-            "coins": {"$gte": data.amount}  # SECURITY: Ensure sender has enough
+            "coins": {"$gte": data.amount}
         },
         {"$inc": {"coins": -data.amount}},
         return_document=True
@@ -874,7 +801,6 @@ async def transfer_coins(data: TransferRequest, user: dict = Depends(get_current
     if not sender_result:
         raise HTTPException(status_code=400, detail="Недостаточно монет")
     
-    # Then, add to recipient
     await db.users.update_one(
         {"id": recipient["id"]},
         {"$inc": {"coins": data.amount}}
@@ -887,7 +813,6 @@ async def transfer_coins(data: TransferRequest, user: dict = Depends(get_current
         "newBalance": sender_result["coins"]
     }
 
-# ==================== BONUS ROUTES ====================
 DAILY_BONUS = 50
 WEEKLY_BONUS = 300
 
@@ -909,7 +834,6 @@ async def claim_bonus(data: BonusRequest, user: dict = Depends(get_current_user)
                 hours_left = int(24 - hours_since)
                 raise HTTPException(status_code=400, detail=f"Ежедневный бонус доступен через {hours_left} ч.")
         
-        # SECURITY FIX: Atomic operation
         updated_user = await db.users.find_one_and_update(
             {"id": user["id"]},
             {
@@ -929,7 +853,6 @@ async def claim_bonus(data: BonusRequest, user: dict = Depends(get_current_user)
                 days_left = int(7 - days_since)
                 raise HTTPException(status_code=400, detail=f"Еженедельный бонус доступен через {days_left} дн.")
         
-        # SECURITY FIX: Atomic operation
         updated_user = await db.users.find_one_and_update(
             {"id": user["id"]},
             {
@@ -940,7 +863,6 @@ async def claim_bonus(data: BonusRequest, user: dict = Depends(get_current_user)
         )
         return {"success": True, "bonusType": "weekly", "amount": WEEKLY_BONUS, "newBalance": updated_user["coins"]}
 
-# ==================== CHEST ROUTES ====================
 CHEST_REWARDS = {
     "common": {"min": 10, "max": 50},
     "rare": {"min": 50, "max": 150},
@@ -960,7 +882,6 @@ async def open_chest(data: ChestRequest, user: dict = Depends(get_current_user),
     reward = CHEST_REWARDS.get(chest["type"], CHEST_REWARDS["common"])
     coins_won = random.randint(reward["min"], reward["max"])
     
-    # SECURITY FIX: Atomic operation
     updated_user = await db.users.find_one_and_update(
         {"id": user["id"]},
         {
@@ -977,36 +898,28 @@ async def open_chest(data: ChestRequest, user: dict = Depends(get_current_user),
         "newBalance": updated_user["coins"]
     }
 
-# ==================== ADMIN ROUTES ====================
 @api_router.post("/admin/add-coins")
 async def admin_add_coins(data: AdminAddCoins, user: dict = Depends(get_current_user), request: Request = None):
     await check_rate_limit(request)
     
-    # SECURITY FIX: Always verify admin status from database
     if not await verify_admin(user):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
-    # Validation already done by Pydantic (amount > 0, <= 100000)
     
     target = await db.users.find_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"_id": 0})
     if not target:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     
-    # ANTI-CHEAT: Check for suspicious gains before updating
     old_coins = target.get("coins", 0)
     old_xp = target.get("xp", 0)
     old_level = target.get("level", 1)
     new_coins = old_coins + data.amount
     
-    # SECURITY FIX: Creator is immune to auto-ban, but still check others
-    # Admin can give up to 10,000 without triggering ban for regular users
     if data.amount <= 10000:
         await check_suspicious_activity(target["id"], old_coins, new_coins, old_xp, old_xp, old_level, old_level, from_admin=True, username=target.get("username"))
     else:
-        # If admin gives >10,000, check but creator is still protected
         await check_suspicious_activity(target["id"], old_coins, new_coins, old_xp, old_xp, old_level, old_level, from_admin=False, username=target.get("username"))
     
-    # SECURITY FIX: Atomic operation
     await db.users.update_one(
         {"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}},
         {"$inc": {"coins": data.amount}}
@@ -1018,21 +931,17 @@ async def admin_add_coins(data: AdminAddCoins, user: dict = Depends(get_current_
 async def admin_remove_coins(data: AdminAddCoins, user: dict = Depends(get_current_user), request: Request = None):
     await check_rate_limit(request)
     
-    # SECURITY FIX: Always verify admin status from database
     if not await verify_admin(user):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
-    # Validation already done by Pydantic
     
     target = await db.users.find_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"_id": 0})
     if not target:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     
-    # Don't allow negative balance
     new_balance = max(0, target["coins"] - data.amount)
     actual_removed = target["coins"] - new_balance
     
-    # SECURITY FIX: Use atomic operation
     await db.users.update_one(
         {"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}},
         {"$set": {"coins": new_balance}}
@@ -1044,23 +953,19 @@ async def admin_remove_coins(data: AdminAddCoins, user: dict = Depends(get_curre
 async def admin_delete_user(data: AdminDeleteUser, user: dict = Depends(get_current_user), request: Request = None):
     await check_rate_limit(request)
     
-    # SECURITY FIX: Always verify admin status from database
     if not await verify_admin(user):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
-    # Find target user
     target = await db.users.find_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"_id": 0})
     if not target:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     
-    # Protection: Cannot delete creator or admins
     if target["username"].lower() == "pseudotamine":
         raise HTTPException(status_code=403, detail="Невозможно удалить создателя проекта")
     
     if target.get("isAdmin", False):
         raise HTTPException(status_code=403, detail="Невозможно удалить администратора")
     
-    # Delete user completely from database
     result = await db.users.delete_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}})
     
     if result.deleted_count == 0:
@@ -1076,41 +981,33 @@ async def admin_delete_user(data: AdminDeleteUser, user: dict = Depends(get_curr
 async def admin_set_level(data: AdminSetLevel, user: dict = Depends(get_current_user), request: Request = None):
     await check_rate_limit(request)
     
-    # SECURITY FIX: Always verify admin status from database
     if not await verify_admin(user):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
-    # Validation already done by Pydantic (level 1-100)
     
-    # Find target user
     target = await db.users.find_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}}, {"_id": 0})
     if not target:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     
-    # Calculate XP for the target level
-    # Formula: each level requires 15% more XP than previous
     total_xp = 0
     xp_for_next = 100
     for lvl in range(1, data.level):
         total_xp += xp_for_next
         xp_for_next = int(xp_for_next * 1.15)
     
-    # ANTI-CHEAT: Check for suspicious level jump (admin can bypass)
     old_coins = target.get("coins", 0)
     old_xp = target.get("xp", 0)
     old_level = target.get("level", 1)
     new_level = data.level
     await check_suspicious_activity(target["id"], old_coins, old_coins, old_xp, total_xp, old_level, new_level, from_admin=True, username=target.get("username"))
     
-    # Calculate XP required for NEXT level (level + 1)
     xp_required_for_next = xp_for_next
     
-    # SECURITY FIX: Level is ALWAYS set with corresponding XP
     await db.users.update_one(
         {"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}},
         {"$set": {
             "level": data.level,
-            "xp": total_xp  # Total XP accumulated up to this level
+            "xp": total_xp
         }}
     )
     
@@ -1125,11 +1022,9 @@ async def admin_set_level(data: AdminSetLevel, user: dict = Depends(get_current_
 
 @api_router.get("/admin/users")
 async def admin_get_users(user: dict = Depends(get_current_user), request: Request = None):
-    # SECURITY FIX: Always verify admin status from database
     if not await verify_admin(user):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
-    # Show approved users + creator + admins in admin panel
     users = await db.users.find(
         {"$or": [{"approved": True}, {"isAdmin": True}, {"username": {"$regex": f"^{CREATOR_USERNAME}$", "$options": "i"}}]},
         {"_id": 0, "passwordHash": 0}
@@ -1151,7 +1046,6 @@ class SetAdminRequest(BaseModel):
 async def admin_give_chest(data: GiveChestRequest, user: dict = Depends(get_current_user), request: Request = None):
     await check_rate_limit(request)
     
-    # SECURITY FIX: Always verify admin status from database
     if not await verify_admin(user):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
@@ -1176,21 +1070,17 @@ async def admin_give_chest(data: GiveChestRequest, user: dict = Depends(get_curr
     
     return {"success": True, "toUser": target["username"], "chestType": data.chestType}
 
-# Creator credentials
 CREATOR_USERNAME = "pseudotamine"
-# SECURITY FIX: Password moved to environment variable
 CREATOR_PASSWORD = os.environ.get('CREATOR_PASSWORD')
 if not CREATOR_PASSWORD:
-    # Allow fallback only for local development
     if os.environ.get('ENVIRONMENT') == 'production':
         raise RuntimeError("CREATOR_PASSWORD must be set in production environment")
-    CREATOR_PASSWORD = 'sukunaW_secret_key_2026'  # Local dev only
+    CREATOR_PASSWORD = 'sukunaW_secret_key_2026'
 
 @api_router.post("/admin/ban")
 async def admin_ban_user(data: BanUserRequest, user: dict = Depends(get_current_user), request: Request = None):
     await check_rate_limit(request)
     
-    # SECURITY FIX: Always verify admin status from database
     if not await verify_admin(user):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
@@ -1198,7 +1088,6 @@ async def admin_ban_user(data: BanUserRequest, user: dict = Depends(get_current_
     if not target:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     
-    # Cannot ban the creator
     if target["username"].lower() == CREATOR_USERNAME.lower():
         raise HTTPException(status_code=403, detail="Не пытайтесь забанить создателя!")
     
@@ -1216,7 +1105,6 @@ async def admin_ban_user(data: BanUserRequest, user: dict = Depends(get_current_
 async def admin_unban_user(data: BanUserRequest, user: dict = Depends(get_current_user), request: Request = None):
     await check_rate_limit(request)
     
-    # SECURITY FIX: Always verify admin status from database
     if not await verify_admin(user):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
@@ -1238,15 +1126,12 @@ async def admin_unban_user(data: BanUserRequest, user: dict = Depends(get_curren
 async def admin_set_admin(data: SetAdminRequest, user: dict = Depends(get_current_user), request: Request = None):
     await check_rate_limit(request)
     
-    # SECURITY FIX: Always verify admin status from database
     if not await verify_admin(user):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
-    # Only creator can set admins
     if user["username"].lower() != CREATOR_USERNAME.lower():
         raise HTTPException(status_code=403, detail="Только создатель может назначать администраторов")
     
-    # Verify creator password
     if data.creatorPassword != CREATOR_PASSWORD:
         raise HTTPException(status_code=403, detail="Неверный пароль создателя")
     
@@ -1254,7 +1139,6 @@ async def admin_set_admin(data: SetAdminRequest, user: dict = Depends(get_curren
     if not target:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     
-    # Cannot change creator's admin status
     if target["username"].lower() == CREATOR_USERNAME.lower():
         raise HTTPException(status_code=403, detail="Нельзя изменить статус создателя")
     
@@ -1275,15 +1159,12 @@ async def admin_set_admin(data: SetAdminRequest, user: dict = Depends(get_curren
 async def admin_remove_admin(data: SetAdminRequest, user: dict = Depends(get_current_user), request: Request = None):
     await check_rate_limit(request)
     
-    # SECURITY FIX: Always verify admin status from database
     if not await verify_admin(user):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
-    # Only creator can remove admins
     if user["username"].lower() != CREATOR_USERNAME.lower():
         raise HTTPException(status_code=403, detail="Только создатель может снимать администраторов")
     
-    # Verify creator password
     if data.creatorPassword != CREATOR_PASSWORD:
         raise HTTPException(status_code=403, detail="Неверный пароль создателя")
     
@@ -1291,7 +1172,6 @@ async def admin_remove_admin(data: SetAdminRequest, user: dict = Depends(get_cur
     if not target:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     
-    # Cannot change creator's admin status
     if target["username"].lower() == CREATOR_USERNAME.lower():
         raise HTTPException(status_code=403, detail="Нельзя изменить статус создателя")
     
@@ -1307,24 +1187,20 @@ async def admin_remove_admin(data: SetAdminRequest, user: dict = Depends(get_cur
 
 @api_router.get("/admin/is-creator")
 async def admin_is_creator(user: dict = Depends(get_current_user), request: Request = None):
-    # SECURITY FIX: Always verify admin status from database
     if not await verify_admin(user):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
     is_creator = user["username"].lower() == CREATOR_USERNAME.lower()
     return {"isCreator": is_creator}
 
-# ==================== PENDING WINS APPROVAL ====================
 class ApproveWinRequest(BaseModel):
     winId: str
 
 @api_router.get("/admin/pending-wins")
 async def admin_get_pending_wins(user: dict = Depends(get_current_user), request: Request = None):
-    # SECURITY FIX: Always verify admin status from database
     if not await verify_admin(user):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
-    # Get all pending wins
     pending = await db.pending_wins.find(
         {"status": "pending"},
         {"_id": 0}
@@ -1335,21 +1211,17 @@ async def admin_get_pending_wins(user: dict = Depends(get_current_user), request
 async def admin_approve_win(data: ApproveWinRequest, user: dict = Depends(get_current_user), request: Request = None):
     await check_rate_limit(request)
     
-    # SECURITY FIX: Always verify admin status from database
     if not await verify_admin(user):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
-    # Find pending win
     win = await db.pending_wins.find_one({"id": data.winId, "status": "pending"}, {"_id": 0})
     if not win:
         raise HTTPException(status_code=404, detail="Выигрыш не найден")
     
-    # Get user
     target = await db.users.find_one({"id": win["userId"]}, {"_id": 0})
     if not target:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     
-    # SECURITY FIX: Atomic award operation
     coins_earned = win.get("coinsEarned", 0)
     xp_earned = win.get("xpEarned", 0)
     
@@ -1364,17 +1236,14 @@ async def admin_approve_win(data: ApproveWinRequest, user: dict = Depends(get_cu
         return_document=True
     )
     
-    # Calculate new level from XP (SECURITY: Level always calculated from XP)
     new_level = calculate_level(updated_user["xp"])
     
-    # Update level if changed
     if new_level != updated_user.get("level", 1):
         await db.users.update_one(
             {"id": win["userId"]},
             {"$set": {"level": new_level}}
         )
     
-    # Mark win as approved
     await db.pending_wins.update_one(
         {"id": data.winId},
         {"$set": {"status": "approved", "approvedAt": datetime.now(timezone.utc).isoformat()}}
@@ -1391,16 +1260,13 @@ async def admin_approve_win(data: ApproveWinRequest, user: dict = Depends(get_cu
 async def admin_reject_win(data: ApproveWinRequest, user: dict = Depends(get_current_user), request: Request = None):
     await check_rate_limit(request)
     
-    # SECURITY FIX: Always verify admin status from database
     if not await verify_admin(user):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
-    # Find pending win
     win = await db.pending_wins.find_one({"id": data.winId, "status": "pending"}, {"_id": 0})
     if not win:
         raise HTTPException(status_code=404, detail="Выигрыш не найден")
     
-    # Mark win as rejected
     await db.pending_wins.update_one(
         {"id": data.winId},
         {"$set": {"status": "rejected", "rejectedAt": datetime.now(timezone.utc).isoformat()}}
@@ -1411,14 +1277,11 @@ async def admin_reject_win(data: ApproveWinRequest, user: dict = Depends(get_cur
         "message": f"Выигрыш отклонён"
     }
 
-# ==================== PENDING USERS MODERATION ====================
 @api_router.get("/admin/pending-users")
 async def admin_get_pending_users(user: dict = Depends(get_current_user), request: Request = None):
-    # SECURITY FIX: Always verify admin status from database
     if not await verify_admin(user):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
-    # Get users who attempted login but not approved yet
     pending = await db.users.find(
         {"approved": False, "isAdmin": False, "loginAttempted": True},
         {"_id": 0, "passwordHash": 0}
@@ -1432,7 +1295,6 @@ class ApproveUserRequest(BaseModel):
 async def admin_approve_user(data: ApproveUserRequest, user: dict = Depends(get_current_user), request: Request = None):
     await check_rate_limit(request)
     
-    # SECURITY FIX: Always verify admin status from database
     if not await verify_admin(user):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
@@ -1443,7 +1305,6 @@ async def admin_approve_user(data: ApproveUserRequest, user: dict = Depends(get_
     if target.get("approved"):
         raise HTTPException(status_code=400, detail="Пользователь уже одобрен")
     
-    # Approve user and initialize game fields
     await db.users.update_one(
         {"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}},
         {"$set": {
@@ -1460,7 +1321,6 @@ async def admin_approve_user(data: ApproveUserRequest, user: dict = Depends(get_
 async def admin_delete_pending(data: ApproveUserRequest, user: dict = Depends(get_current_user), request: Request = None):
     await check_rate_limit(request)
     
-    # SECURITY FIX: Always verify admin status from database
     if not await verify_admin(user):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
     
@@ -1468,20 +1328,16 @@ async def admin_delete_pending(data: ApproveUserRequest, user: dict = Depends(ge
     if not target:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     
-    # Delete user completely
     await db.users.delete_one({"username": {"$regex": f"^{data.targetUsername}$", "$options": "i"}})
     
     return {"success": True, "message": f"Пользователь {target['username']} удалён"}
 
-# ==================== HEALTH CHECK ====================
 @api_router.get("/health")
 async def health():
     return {"status": "ok"}
 
-# ==================== LEADERBOARD ====================
 @api_router.get("/leaderboard")
 async def get_leaderboard(user: dict = Depends(get_current_user), request: Request = None):
-    # Get top 50 approved non-admin NON-BANNED users sorted by coins
     cursor = db.users.find(
         {"isAdmin": {"$ne": True}, "approved": True, "isBanned": {"$ne": True}},
         {"_id": 0, "id": 1, "username": 1, "coins": 1, "level": 1}
@@ -1490,40 +1346,32 @@ async def get_leaderboard(user: dict = Depends(get_current_user), request: Reque
     leaders = await cursor.to_list(length=50)
     return leaders
 
-# ==================== CRASH GAME ====================
 class CrashGameRequest(BaseModel):
-    betAmount: int = Field(ge=10, le=50000)  # SECURITY: Must be 10-50000
+    betAmount: int = Field(ge=10, le=50000)
 
 @api_router.post("/crash/play")
 async def crash_play(data: CrashGameRequest, user: dict = Depends(get_current_user), request: Request = None):
     await check_rate_limit(request)
     
-    # Cooldown: 1 second between crash games
     await check_cooldown(user["id"], "crash_play", 1)
     
-    # Check if user is approved (skip for creator and admins)
     is_creator = user["username"].lower() == CREATOR_USERNAME.lower()
     if not is_creator and not user.get("isAdmin", False) and not user.get("approved", False):
         raise HTTPException(status_code=403, detail="Ваш аккаунт ожидает одобрения администратора")
     
-    # Validation already done by Pydantic (10-50000)
     
-    # Check if there's an active game
     if user.get("activeCrashGame"):
-        # Check if game is older than 60 seconds - if yes, clean it up
         start_time_str = user["activeCrashGame"].get("startTime")
         if start_time_str:
             start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
             time_elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
             
             if time_elapsed > 60:
-                # Clean up old game (money was already deducted, no refund)
                 await db.users.update_one(
                     {"id": user["id"]},
                     {"$unset": {"activeCrashGame": ""}}
                 )
             else:
-                # Show better error message
                 seconds_left = int(60 - time_elapsed)
                 raise HTTPException(
                     status_code=400, 
@@ -1534,22 +1382,18 @@ async def crash_play(data: CrashGameRequest, user: dict = Depends(get_current_us
     
     rand = random.random()
     
-    # 40% win, 60% loss
     if rand < 0.40:
-        # Win: multiplier >= 1.0
-        # Progressive difficulty - higher multipliers are MUCH rarer
         win_rand = random.random()
         
-        if win_rand < 0.70:  # 70% of wins: 1.0-1.7x (MOST COMMON)
+        if win_rand < 0.70:
             crash_multiplier = round(random.uniform(1.0, 1.7), 2)
-        elif win_rand < 0.90:  # 20% of wins: 1.7-3.0x (RARE)
+        elif win_rand < 0.90:
             crash_multiplier = round(random.uniform(1.7, 3.0), 2)
-        elif win_rand < 0.98:  # 8% of wins: 3.0-10.0x (VERY RARE)
+        elif win_rand < 0.98:
             crash_multiplier = round(random.uniform(3.0, 10.0), 2)
-        else:  # 2% of wins: 10.0-30.0x (EXTREMELY RARE - JACKPOT!)
+        else:
             crash_multiplier = round(random.uniform(10.0, 30.0), 2)
     else:
-        # Loss: multiplier < 1.0
         crash_multiplier = round(random.uniform(0.2, 0.99), 2)
     
     if crash_multiplier == 1.0:
@@ -1567,11 +1411,10 @@ async def crash_play(data: CrashGameRequest, user: dict = Depends(get_current_us
     
     game_id = str(uuid.uuid4())
     
-    # SECURITY FIX: Atomic deduction with race condition protection
     updated_user = await db.users.find_one_and_update(
         {
             "id": user["id"],
-            "coins": {"$gte": data.betAmount}  # SECURITY: Ensure user has enough
+            "coins": {"$gte": data.betAmount}
         },
         {
             "$inc": {"coins": -data.betAmount},
@@ -1608,17 +1451,13 @@ async def crash_complete(user: dict = Depends(get_current_user), request: Reques
     if not active_game:
         raise HTTPException(status_code=400, detail="Нет активной игры")
     
-    # Money was already deducted in /crash/play
     bet_amount = active_game["betAmount"]
     profit = active_game["profit"]
     won = active_game.get("won")
     
-    # Calculate total winnings (bet + profit)
     total_winnings = bet_amount + profit if won else 0
     
-    # Check if TOTAL win is >5000 and needs admin approval
     if won and total_winnings > 5000:
-        # Create pending win for admin approval
         pending_win = {
             "id": str(uuid.uuid4()),
             "userId": user["id"],
@@ -1626,14 +1465,13 @@ async def crash_complete(user: dict = Depends(get_current_user), request: Reques
             "gameType": "crash",
             "betAmount": bet_amount,
             "multiplier": active_game["crashMultiplier"],
-            "coinsEarned": total_winnings,  # Total winnings, not just profit
+            "coinsEarned": total_winnings,
             "xpEarned": 0,
             "createdAt": datetime.now(timezone.utc).isoformat(),
             "status": "pending"
         }
         await db.pending_wins.insert_one(pending_win)
         
-        # Clear active game (money was already deducted, so no refund)
         await db.users.update_one(
             {"id": user["id"]},
             {"$unset": {"activeCrashGame": ""}}
@@ -1646,7 +1484,6 @@ async def crash_complete(user: dict = Depends(get_current_user), request: Reques
             "multiplier": active_game["crashMultiplier"]
         }
     
-    # SECURITY FIX: Atomic operation for adding winnings
     new_balance = user.get("coins", 0) + bet_amount + profit
     
     await db.users.update_one(
@@ -1667,7 +1504,6 @@ async def crash_complete(user: dict = Depends(get_current_user), request: Reques
         "newBalance": new_balance
     }
 
-# ==================== SHOP CHESTS ====================
 class BuyChestRequest(BaseModel):
     chestType: str
 
@@ -1692,11 +1528,10 @@ async def shop_buy_chest(data: BuyChestRequest, user: dict = Depends(get_current
         "droppedAt": datetime.now(timezone.utc).isoformat()
     }
     
-    # SECURITY FIX: Atomic purchase with race condition protection
     updated_user = await db.users.find_one_and_update(
         {
             "id": user["id"],
-            "coins": {"$gte": price}  # SECURITY: Ensure user has enough
+            "coins": {"$gte": price}
         },
         {
             "$inc": {"coins": -price},
@@ -1710,7 +1545,6 @@ async def shop_buy_chest(data: BuyChestRequest, user: dict = Depends(get_current
     
     return {"success": True, "chest": chest, "newBalance": updated_user["coins"]}
 
-# Include router
 app.include_router(api_router)
 
 app.add_middleware(
@@ -1726,11 +1560,8 @@ logger = logging.getLogger(__name__)
 
 @app.on_event("startup")
 async def startup_event():
-    # SECURITY: Create TTL indexes for temporary collections (auto-cleanup)
-    # This prevents MongoDB from filling up with old data
     
     try:
-        # TTL Index for failed_logins: auto-delete after 1 hour (3600 seconds)
         await db.failed_logins.create_index(
             "timestamp",
             expireAfterSeconds=3600,
@@ -1740,18 +1571,13 @@ async def startup_event():
     except Exception as e:
         logger.info(f"TTL index for failed_logins already exists or error: {e}")
     
-    # NOTE: We don't use blocked_usernames anymore (progressive delay instead)
-    # But if collection exists, clean it up
     try:
         await db.blocked_usernames.drop()
         logger.info("Dropped old blocked_usernames collection (no longer used)")
     except Exception:
         pass
     
-    # IMPORTANT: NO TTL on users collection! Users must persist forever.
-    # TTL is ONLY for temporary security-related collections.
     
-    # Create unique index on username for users (if not exists)
     try:
         await db.users.create_index(
             [("username", 1)],
@@ -1763,10 +1589,8 @@ async def startup_event():
     except Exception as e:
         logger.info(f"Username unique index already exists or error: {e}")
     
-    # Check if admin user exists
     admin = await db.users.find_one({"username": "pseudotamine"})
     if not admin:
-        # SECURITY FIX: Use password from environment variable
         admin_password = os.environ.get('CREATOR_PASSWORD')
         admin_id = str(uuid.uuid4())
         admin_user = {
@@ -1783,7 +1607,7 @@ async def startup_event():
             "purchaseHistory": [],
             "isAdmin": True,
             "isBanned": False,
-            "approved": True,  # Auto-approved for creator
+            "approved": True,
             "lastGameTime": None,
             "lastDailyBonus": None,
             "lastWeeklyBonus": None,
