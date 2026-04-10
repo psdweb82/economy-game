@@ -729,6 +729,7 @@ const DodgeGameInner = () => {
     speedMultiplier: 1,
     paused: false,
     pausedTime: 0,
+    lastFrameTime: 0,
   });
 
   const keysRef = useRef({ up: false, down: false, left: false, right: false });
@@ -839,55 +840,67 @@ const DodgeGameInner = () => {
     };
     g.spawnInterval = setTimeout(scheduleSpawn, 500);
 
+    g.lastFrameTime = performance.now();
+
     const loop = () => {
       if (!g.running || g.paused) return;
-      
+
+      const now = performance.now();
+      const elapsed = now - g.lastFrameTime;
+      g.lastFrameTime = now;
+
+      let steps = Math.round(elapsed / (1000 / 60));
+      if (steps < 1) steps = 1;
+      if (steps > 4) steps = 4;
+
       const keys = keysRef.current;
       const touch = touchRef.current;
       const speed = 6;
-
-      if (keys.up && g.player.y > g.player.size) g.player.y -= speed;
-      if (keys.down && g.player.y < 400 - g.player.size) g.player.y += speed;
-      if (keys.left && g.player.x > g.player.size) g.player.x -= speed;
-      if (keys.right && g.player.x < 600 - g.player.size) g.player.x += speed;
-
-      if (touch.x !== null && touch.y !== null) {
-        const dx = touch.x - g.player.x;
-        const dy = touch.y - g.player.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist > 5) {
-          g.player.x += (dx / dist) * speed;
-          g.player.y += (dy / dist) * speed;
-        }
-      }
-
-      g.player.x = Math.max(g.player.size, Math.min(600 - g.player.size, g.player.x));
-      g.player.y = Math.max(g.player.size, Math.min(400 - g.player.size, g.player.y));
-
-      if (g.score >= 50) g.speedMultiplier = 1.5;
-      if (g.score >= 100) g.speedMultiplier = 2;
-      if (g.score >= 150) g.speedMultiplier = 2.5;
-
       let collision = false;
-      g.enemies = g.enemies.filter((e) => {
-        e.x += e.vx;
-        e.y += e.vy;
-        
-        if (e.x < e.size/2 || e.x > 600 - e.size/2) e.vx *= -1;
-        
-        const dx = g.player.x - e.x;
-        const dy = g.player.y - e.y;
-        if (Math.sqrt(dx * dx + dy * dy) < (g.player.size + e.size) / 2) {
-          collision = true;
+
+      for (let s = 0; s < steps && !collision; s++) {
+        if (keys.up && g.player.y > g.player.size) g.player.y -= speed;
+        if (keys.down && g.player.y < 400 - g.player.size) g.player.y += speed;
+        if (keys.left && g.player.x > g.player.size) g.player.x -= speed;
+        if (keys.right && g.player.x < 600 - g.player.size) g.player.x += speed;
+
+        if (touch.x !== null && touch.y !== null) {
+          const dx = touch.x - g.player.x;
+          const dy = touch.y - g.player.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist > 5) {
+            g.player.x += (dx / dist) * speed;
+            g.player.y += (dy / dist) * speed;
+          }
         }
-        
-        if (e.y > 420) {
-          g.score++;
-          setScore(g.score);
-          return false;
-        }
-        return true;
-      });
+
+        g.player.x = Math.max(g.player.size, Math.min(600 - g.player.size, g.player.x));
+        g.player.y = Math.max(g.player.size, Math.min(400 - g.player.size, g.player.y));
+
+        if (g.score >= 50) g.speedMultiplier = 1.5;
+        if (g.score >= 100) g.speedMultiplier = 2;
+        if (g.score >= 150) g.speedMultiplier = 2.5;
+
+        g.enemies = g.enemies.filter((e) => {
+          e.x += e.vx;
+          e.y += e.vy;
+
+          if (e.x < e.size/2 || e.x > 600 - e.size/2) e.vx *= -1;
+
+          const dx = g.player.x - e.x;
+          const dy = g.player.y - e.y;
+          if (Math.sqrt(dx * dx + dy * dy) < (g.player.size + e.size) / 2) {
+            collision = true;
+          }
+
+          if (e.y > 420) {
+            g.score++;
+            setScore(g.score);
+            return false;
+          }
+          return true;
+        });
+      }
 
       const canvas = canvasRef.current;
       if (canvas) {
@@ -1052,56 +1065,68 @@ const DodgeGameInner = () => {
           };
           g.spawnInterval = setTimeout(scheduleSpawn, spawnRate);
           
+          g.lastFrameTime = performance.now();
+
           const canvas = canvasRef.current;
           const resumeLoop = () => {
             if (!g.running || g.paused) return;
-            
+
+            const now = performance.now();
+            const elapsed = now - g.lastFrameTime;
+            g.lastFrameTime = now;
+
+            let steps = Math.round(elapsed / (1000 / 60));
+            if (steps < 1) steps = 1;
+            if (steps > 4) steps = 4;
+
             const keys = keysRef.current;
             const touch = touchRef.current;
             const speed = 6;
-
-            if (keys.up && g.player.y > g.player.size) g.player.y -= speed;
-            if (keys.down && g.player.y < 400 - g.player.size) g.player.y += speed;
-            if (keys.left && g.player.x > g.player.size) g.player.x -= speed;
-            if (keys.right && g.player.x < 600 - g.player.size) g.player.x += speed;
-
-            if (touch.x !== null && touch.y !== null) {
-              const dx = touch.x - g.player.x;
-              const dy = touch.y - g.player.y;
-              const dist = Math.sqrt(dx * dx + dy * dy);
-              if (dist > 5) {
-                g.player.x += (dx / dist) * speed;
-                g.player.y += (dy / dist) * speed;
-              }
-            }
-
-            g.player.x = Math.max(g.player.size, Math.min(600 - g.player.size, g.player.x));
-            g.player.y = Math.max(g.player.size, Math.min(400 - g.player.size, g.player.y));
-
-            if (g.score >= 50) g.speedMultiplier = 1.5;
-            if (g.score >= 100) g.speedMultiplier = 2;
-            if (g.score >= 150) g.speedMultiplier = 2.5;
-
             let collision = false;
-            g.enemies = g.enemies.filter((e) => {
-              e.x += e.vx;
-              e.y += e.vy;
-              
-              if (e.x < e.size/2 || e.x > 600 - e.size/2) e.vx *= -1;
-              
-              const dx = g.player.x - e.x;
-              const dy = g.player.y - e.y;
-              if (Math.sqrt(dx * dx + dy * dy) < (g.player.size + e.size) / 2) {
-                collision = true;
+
+            for (let s = 0; s < steps && !collision; s++) {
+              if (keys.up && g.player.y > g.player.size) g.player.y -= speed;
+              if (keys.down && g.player.y < 400 - g.player.size) g.player.y += speed;
+              if (keys.left && g.player.x > g.player.size) g.player.x -= speed;
+              if (keys.right && g.player.x < 600 - g.player.size) g.player.x += speed;
+
+              if (touch.x !== null && touch.y !== null) {
+                const dx = touch.x - g.player.x;
+                const dy = touch.y - g.player.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist > 5) {
+                  g.player.x += (dx / dist) * speed;
+                  g.player.y += (dy / dist) * speed;
+                }
               }
-              
-              if (e.y > 420) {
-                g.score++;
-                setScore(g.score);
-                return false;
-              }
-              return true;
-            });
+
+              g.player.x = Math.max(g.player.size, Math.min(600 - g.player.size, g.player.x));
+              g.player.y = Math.max(g.player.size, Math.min(400 - g.player.size, g.player.y));
+
+              if (g.score >= 50) g.speedMultiplier = 1.5;
+              if (g.score >= 100) g.speedMultiplier = 2;
+              if (g.score >= 150) g.speedMultiplier = 2.5;
+
+              g.enemies = g.enemies.filter((e) => {
+                e.x += e.vx;
+                e.y += e.vy;
+
+                if (e.x < e.size/2 || e.x > 600 - e.size/2) e.vx *= -1;
+
+                const dx = g.player.x - e.x;
+                const dy = g.player.y - e.y;
+                if (Math.sqrt(dx * dx + dy * dy) < (g.player.size + e.size) / 2) {
+                  collision = true;
+                }
+
+                if (e.y > 420) {
+                  g.score++;
+                  setScore(g.score);
+                  return false;
+                }
+                return true;
+              });
+            }
 
             if (canvas) {
               const ctx = canvas.getContext("2d");
