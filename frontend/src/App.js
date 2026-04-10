@@ -2074,7 +2074,7 @@ const Transfer = () => {
                 <span className="input-icon"><Coins size={16} /></span>
                 <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} className="input-field" placeholder="0" min="1" max={maxAmount} data-testid="transfer-amount" />
               </div>
-              <p className="text-gray-500 text-sm mt-2">Максимум: {maxAmount} монет</p>
+              <p className="text-gray-500 text-sm mt-2">Максимум: 50000 монет</p>
             </div>
             <div className="flex flex-wrap gap-3">
               {[100, 500, 1000].filter(v => v <= maxAmount).map(v => (
